@@ -1,0 +1,4 @@
+"""
+PlateGuard worker application package.
+"""
+

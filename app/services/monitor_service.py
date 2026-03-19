@@ -1,0 +1,170 @@
+"""
+Monitor Service — orchestrates plate checks across portals.
+
+Implements the core flow:
+1. Run portal scrapers
+2. Wrap results as Violation models
+3. Persist via ViolationStore
+4. Trigger alerts via AlertService
+"""
+import asyncio
+from datetime import datetime, timezone
+from typing import Optional
+
+import structlog
+
+from ..config import settings
+from ..models.violation import Violation, ViolationType, ViolationStatus
+from ..portals import boston_parking
+from .alert_service import AlertService
+from .violation_store import ViolationStore
+
+
+logger = structlog.get_logger()
+
+
+PORTAL_MAP = {
+    "boston_parking": "boston_parking",
+    # "ezdrivema": "ezdrivema_tolls",  # enable when wiring up tolls
+}
+
+
+class MonitorService:
+    def __init__(self) -> None:
+        self.store = ViolationStore()
+        self.alerts = AlertService()
+
+    async def check_single_plate(
+        self,
+        plate_number: str,
+        state: str = "MA",
+        portals: Optional[list[str]] = None,
+    ) -> dict:
+        """Check one plate across specified (or all applicable) portals."""
+        if portals is None:
+            portals = list(PORTAL_MAP.keys())
+
+        all_violations: list[Violation] = []
+        new_violations: list[Violation] = []
+        errors: list[str] = []
+        checked: list[str] = []
+
+        for portal_name in portals:
+            if portal_name not in PORTAL_MAP:
+                errors.append(f"Unknown portal: {portal_name}")
+                continue
+
+            try:
+                if portal_name == "boston_parking":
+                    result = boston_parking.check_plate_tickets(plate_number, state)
+                    checked.append(portal_name)
+
+                    tickets = result.get("tickets", [])
+                    for ticket in tickets:
+                        violation = self._from_boston_ticket(ticket, plate_number, state)
+                        all_violations.append(violation)
+
+                        is_new = await self.store.upsert_violation(violation)
+                        if is_new:
+                            new_violations.append(violation)
+
+                    await self.store.log_check(
+                        plate_number=plate_number,
+                        state=state,
+                        portal=portal_name,
+                        status="success",
+                        violations_found=len(tickets),
+                        new_violations=len(new_violations),
+                    )
+                else:
+                    errors.append(f"{portal_name}: not yet implemented")
+
+                await asyncio.sleep(settings.request_delay_seconds)
+
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.error("portal_check_failed", portal=portal_name, error=str(exc))
+                errors.append(f"{portal_name}: {exc}")
+                await self.store.log_check(
+                    plate_number=plate_number,
+                    state=state,
+                    portal=portal_name,
+                    status="error",
+                    error_message=str(exc),
+                )
+
+        if new_violations:
+            await self.alerts.send_new_violation_alerts(new_violations)
+
+        return {
+            "plate_number": plate_number,
+            "state": state,
+            "violations_found": len(all_violations),
+            "new_violations": len(new_violations),
+            "portals_checked": checked,
+            "errors": errors,
+        }
+
+    async def check_all_active_plates(self) -> dict:
+        """
+        Check all active plates in the database.
+        Uses semaphore to limit concurrent checks.
+        """
+        plates = await self.store.get_active_plates()
+        logger.info("batch_check_starting", plate_count=len(plates))
+
+        semaphore = asyncio.Semaphore(settings.max_concurrent_checks)
+
+        async def check_with_semaphore(plate: dict):
+            async with semaphore:
+                return await self.check_single_plate(
+                    plate_number=plate["plate_number"],
+                    state=plate.get("state", "MA"),
+                    portals=plate.get("portals"),
+                )
+
+        tasks = [check_with_semaphore(plate) for plate in plates]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        total_violations = 0
+        total_new = 0
+        all_errors: list[str] = []
+
+        for result in results:
+            if isinstance(result, Exception):
+                all_errors.append(str(result))
+            else:
+                total_violations += result["violations_found"]
+                total_new += result["new_violations"]
+                all_errors.extend(result["errors"])
+
+        return {
+            "plates_checked": len(plates),
+            "total_violations": total_violations,
+            "new_violations": total_new,
+            "errors": all_errors,
+        }
+
+    def _from_boston_ticket(
+        self,
+        ticket: dict,
+        plate_number: str,
+        state: str,
+    ) -> Violation:
+        """
+        Map a raw BostonParking BostonViolation dict into a Violation model.
+
+        The upstream scraper currently exposes a minimal schema, so we mostly
+        fill the required fields and stash the rest in raw_data.
+        """
+        ticket_number = str(ticket.get("violation_number") or ticket.get("violation_id") or "")
+
+        return Violation(
+            violation_type=ViolationType.parking,
+            source_portal="boston_parking",
+            ticket_number=ticket_number,
+            plate_number=plate_number,
+            state=state,
+            status=ViolationStatus.open,
+            raw_data=ticket,
+        )
+
