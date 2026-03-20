@@ -4,6 +4,7 @@ PlateGuard Worker — FastAPI application.
 Endpoints:
 - GET  /api/health          Health check
 - POST /api/test-alert      Send sample violation alert email (Resend)
+- POST /api/onboard         GHL waitlist signup (Auth + profile + optional plate)
 - POST /api/check-plate     Check a single plate across all portals
 - POST /api/run-batch       Check all active plates (placeholder)
 """
@@ -14,7 +15,7 @@ from fastapi import Depends, FastAPI, HTTPException, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from .config import settings
-from .routers import health, monitor
+from .routers import health, monitor, onboard
 
 
 logger = structlog.get_logger()
@@ -62,6 +63,12 @@ app.include_router(
     monitor.router,
     prefix="/api",
     tags=["monitor"],
+    dependencies=[Depends(verify_api_key)],
+)
+app.include_router(
+    onboard.router,
+    prefix="/api",
+    tags=["onboard"],
     dependencies=[Depends(verify_api_key)],
 )
 

@@ -270,6 +270,92 @@ class AlertService:
         subject = "PlateGuard: Test alert — sample violation email"
         return await self.send_email(to_email.strip(), subject, html_body)
 
+    def _build_waitlist_welcome_html(
+        self,
+        first_name: str,
+        full_name: str,
+        plate_number: Optional[str],
+    ) -> str:
+        """Branded HTML for GHL waitlist / onboard confirmation (Resend)."""
+        fn_clean = (first_name or "").strip()
+        safe_fn = html_module.escape(fn_clean or "there")
+        full_clean = (full_name or "").strip()
+        safe_full = html_module.escape(full_clean or fn_clean or "there")
+        thanks = "Thanks for joining the PlateGuard waitlist."
+        if full_clean and full_clean.lower() != fn_clean.lower():
+            thanks += f" We have you down as <strong>{safe_full}</strong>."
+        if plate_number and str(plate_number).strip():
+            safe_plate = html_module.escape(str(plate_number).strip().upper())
+            plate_block = (
+                f'<p style="margin:0 0 16px;color:{COLOR_NAVY};">'
+                f"We&apos;ll monitor plate <strong style=\"color:{COLOR_ORANGE};\">{safe_plate}</strong> "
+                f"(MA) for you when PlateGuard goes live.</p>"
+            )
+        else:
+            plate_block = (
+                f'<p style="margin:0 0 16px;color:{COLOR_NAVY};">'
+                "You can add a license plate from your account anytime after launch.</p>"
+            )
+
+        return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>You&apos;re on the PlateGuard waitlist</title>
+</head>
+<body style="margin:0;padding:0;background-color:{COLOR_BG};font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background-color:{COLOR_BG};padding:24px 16px;">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="100%" style="max-width:560px;background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 2px 8px rgba(30,45,77,0.08);">
+          <tr>
+            <td style="background-color:{COLOR_NAVY};padding:20px 24px;">
+              <p style="margin:0;font-size:11px;letter-spacing:0.12em;text-transform:uppercase;color:{COLOR_ORANGE};font-weight:600;">PlateGuard</p>
+              <h1 style="margin:8px 0 0;font-size:22px;line-height:1.25;color:#ffffff;font-weight:700;">You&apos;re on the list</h1>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:24px;color:{COLOR_NAVY};font-size:15px;line-height:1.55;">
+              <p style="margin:0 0 16px;">Hi {safe_fn},</p>
+              <p style="margin:0 0 16px;">{thanks} We&apos;ll email you when your spot opens and monitoring is ready.</p>
+              {plate_block}
+              <p style="margin:0;font-size:13px;color:#5c6b7f;">Questions? Just reply to this email.</p>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:16px 24px 24px;text-align:center;">
+              <p style="margin:0;font-size:12px;color:#8a94a6;">PlateGuard · <span style="color:{COLOR_ORANGE};">Tickets &amp; tolls, before late fees</span></p>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>"""
+
+    async def send_waitlist_welcome_email(
+        self,
+        to_email: str,
+        first_name: str,
+        last_name: str,
+        plate_number: Optional[str],
+    ) -> bool:
+        """
+        Waitlist confirmation email (same Resend integration as other alerts).
+        """
+        if not settings.resend_api_key:
+            logger.warning("waitlist_welcome_skipped_no_resend_key")
+            return False
+
+        fn = (first_name or "").strip()
+        ln = (last_name or "").strip()
+        full_name = f"{fn} {ln}".strip()
+        subject = "You're on the PlateGuard waitlist"
+        html_body = self._build_waitlist_welcome_html(fn, full_name, plate_number)
+        return await self.send_email(to_email.strip().lower(), subject, html_body)
+
     async def send_new_violation_alerts(self, violations: List[Violation]) -> None:
         """Send one Resend email per new violation after resolving user via Supabase."""
         if not settings.resend_api_key:
