@@ -4,9 +4,11 @@ Monitor router — handles plate checking endpoints.
 from typing import Optional
 
 import structlog
-from fastapi import APIRouter, BackgroundTasks
-from pydantic import BaseModel
+from fastapi import APIRouter, BackgroundTasks, HTTPException
+from pydantic import BaseModel, EmailStr
 
+from ..config import settings
+from ..services.alert_service import AlertService
 from ..services.monitor_service import MonitorService
 
 
@@ -38,6 +40,43 @@ class BatchResponse(BaseModel):
     total_violations: int
     new_violations: int
     errors: list[str]
+
+
+class TestAlertRequest(BaseModel):
+    """Body for POST /api/test-alert — sends a sample violation email via Resend."""
+
+    email: EmailStr
+
+
+class TestAlertResponse(BaseModel):
+    sent: bool
+    message: str
+
+
+@router.post("/test-alert", response_model=TestAlertResponse)
+async def test_alert(request: TestAlertRequest):
+    """
+    Send a sample new-violation email to the given address.
+    Uses the same HTML template and Resend integration as production alerts.
+    """
+    if not settings.resend_api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="RESEND_API_KEY is not configured",
+        )
+
+    alerts = AlertService()
+    ok = await alerts.send_sample_alert_email(str(request.email))
+    if not ok:
+        raise HTTPException(
+            status_code=502,
+            detail="Failed to send test email via Resend; check worker logs",
+        )
+
+    return TestAlertResponse(
+        sent=True,
+        message="Test alert sent successfully",
+    )
 
 
 @router.post("/check-plate", response_model=CheckResponse)

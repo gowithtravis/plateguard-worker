@@ -3,6 +3,7 @@ PlateGuard Worker — FastAPI application.
 
 Endpoints:
 - GET  /api/health          Health check
+- POST /api/test-alert      Send sample violation alert email (Resend)
 - POST /api/check-plate     Check a single plate across all portals
 - POST /api/run-batch       Check all active plates (placeholder)
 """

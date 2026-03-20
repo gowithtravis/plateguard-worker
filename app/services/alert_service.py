@@ -7,15 +7,14 @@ from __future__ import annotations
 
 import asyncio
 import html as html_module
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from datetime import datetime
+from typing import Any, Dict, List, Optional
 
 import httpx
 import structlog
 
 from ..config import settings
-
-if TYPE_CHECKING:
-    from ..models.violation import Violation
+from ..models.violation import Violation, ViolationStatus, ViolationType
 
 try:
     from supabase import create_client  # type: ignore
@@ -41,7 +40,7 @@ class AlertService:
                 settings.supabase_service_key,  # type: ignore[arg-type]
             )
 
-    def _lookup_user_email_sync(self, violation: "Violation") -> Optional[str]:
+    def _lookup_user_email_sync(self, violation: Violation) -> Optional[str]:
         """Resolve profile email for a violation's plate (sync; run in thread)."""
         if not self._client:
             logger.warning("alert_email_skipped_no_supabase")
@@ -99,7 +98,7 @@ class AlertService:
 
         return str(prof.data[0]["email"]).strip() or None
 
-    def _violation_display_fields(self, violation: "Violation") -> Dict[str, str]:
+    def _violation_display_fields(self, violation: Violation) -> Dict[str, str]:
         """Collect display strings for email (model fields + raw_data fallbacks)."""
         raw: Dict[str, Any] = {}
         if isinstance(violation.raw_data, dict):
@@ -181,7 +180,7 @@ class AlertService:
             "portal": violation.source_portal.replace("_", " ").title(),
         }
 
-    def _build_new_violation_html(self, violation: "Violation") -> str:
+    def _build_new_violation_html(self, violation: Violation) -> str:
         f = self._violation_display_fields(violation)
         safe = {k: html_module.escape(v) for k, v in f.items()}
 
@@ -243,7 +242,35 @@ class AlertService:
 </body>
 </html>"""
 
-    async def send_new_violation_alerts(self, violations: List["Violation"]) -> None:
+    async def send_sample_alert_email(self, to_email: str) -> bool:
+        """
+        Send a test email to the given address using the same HTML template
+        and Resend path as production new-violation alerts (no Supabase lookup).
+        """
+        if not settings.resend_api_key:
+            logger.warning("test_alert_skipped_no_resend_key")
+            return False
+
+        sample = Violation(
+            violation_type=ViolationType.parking,
+            source_portal="boston_parking",
+            ticket_number="TEST-12345",
+            plate_number="SAMPLE",
+            state="MA",
+            amount_due=75.00,
+            violation_description=(
+                "Sample: No parking during street cleaning (test alert — not a real ticket)"
+            ),
+            location="123 Example St, Boston, MA",
+            issue_date=datetime(2026, 3, 1, 12, 0, 0),
+            status=ViolationStatus.open,
+            raw_data={},
+        )
+        html_body = self._build_new_violation_html(sample)
+        subject = "PlateGuard: Test alert — sample violation email"
+        return await self.send_email(to_email.strip(), subject, html_body)
+
+    async def send_new_violation_alerts(self, violations: List[Violation]) -> None:
         """Send one Resend email per new violation after resolving user via Supabase."""
         if not settings.resend_api_key:
             logger.warning("alerts_skipped_no_resend_key")
