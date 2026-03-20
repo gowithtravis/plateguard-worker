@@ -39,6 +39,7 @@ class MonitorService:
         plate_number: str,
         state: str = "MA",
         portals: Optional[list[str]] = None,
+        plate_id: Optional[str] = None,
     ) -> dict:
         """Check one plate across specified (or all applicable) portals."""
         if portals is None:
@@ -61,7 +62,12 @@ class MonitorService:
 
                     tickets = result.get("tickets", [])
                     for ticket in tickets:
-                        violation = self._from_boston_ticket(ticket, plate_number, state)
+                        violation = self._from_boston_ticket(
+                            ticket,
+                            plate_number,
+                            state,
+                            plate_id=plate_id,
+                        )
                         all_violations.append(violation)
 
                         is_new = await self.store.upsert_violation(violation)
@@ -120,6 +126,7 @@ class MonitorService:
                     plate_number=plate["plate_number"],
                     state=plate.get("state", "MA"),
                     portals=plate.get("portals"),
+                    plate_id=str(plate["id"]) if plate.get("id") is not None else None,
                 )
 
         tasks = [check_with_semaphore(plate) for plate in plates]
@@ -149,14 +156,50 @@ class MonitorService:
         ticket: dict,
         plate_number: str,
         state: str,
+        plate_id: Optional[str] = None,
     ) -> Violation:
         """
         Map a raw BostonParking BostonViolation dict into a Violation model.
 
-        The upstream scraper currently exposes a minimal schema, so we mostly
-        fill the required fields and stash the rest in raw_data.
+        Fills structured fields when RMCPay-style keys exist; full payload stays in raw_data.
         """
         ticket_number = str(ticket.get("violation_number") or ticket.get("violation_id") or "")
+
+        amount_due = self._coerce_float(
+            ticket.get("amount_due")
+            or ticket.get("fine_amount")
+            or ticket.get("balance")
+            or ticket.get("amount")
+            or ticket.get("violation_amount")
+            or ticket.get("total_amount")
+        )
+
+        violation_description = self._first_non_empty_str(
+            ticket,
+            "violation_description",
+            "description",
+            "violation_desc",
+            "comments",
+            "comment",
+        )
+
+        location = self._first_non_empty_str(
+            ticket,
+            "location",
+            "violation_location",
+            "address",
+            "street",
+            "block",
+        )
+
+        issue_date = self._parse_issue_date(
+            ticket.get("issue_date")
+            or ticket.get("violation_date")
+            or ticket.get("date_issued")
+            or ticket.get("issued_date")
+            or ticket.get("datetime")
+            or ticket.get("violation_datetime")
+        )
 
         return Violation(
             violation_type=ViolationType.parking,
@@ -164,7 +207,61 @@ class MonitorService:
             ticket_number=ticket_number,
             plate_number=plate_number,
             state=state,
+            plate_id=plate_id,
+            amount_due=amount_due,
+            violation_description=violation_description,
+            location=location,
+            issue_date=issue_date,
             status=ViolationStatus.open,
             raw_data=ticket,
         )
+
+    @staticmethod
+    def _coerce_float(value: object) -> Optional[float]:
+        if value is None or value == "":
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _first_non_empty_str(data: dict, *keys: str) -> Optional[str]:
+        for k in keys:
+            v = data.get(k)
+            if v is not None and str(v).strip():
+                return str(v).strip()
+        return None
+
+    @staticmethod
+    def _parse_issue_date(value: object) -> Optional[datetime]:
+        if value is None or value == "":
+            return None
+        if isinstance(value, datetime):
+            return value
+        s = str(value).strip()
+        if not s:
+            return None
+        try:
+            return datetime.fromisoformat(s.replace("Z", "+00:00"))
+        except ValueError:
+            pass
+        for fmt in (
+            "%Y-%m-%d",
+            "%m/%d/%Y",
+            "%m-%d-%Y",
+            "%Y-%m-%dT%H:%M:%S",
+            "%Y-%m-%dT%H:%M:%S.%f",
+            "%Y-%m-%d %H:%M:%S",
+        ):
+            try:
+                return datetime.strptime(s, fmt)
+            except ValueError:
+                continue
+        if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+            try:
+                return datetime.strptime(s[:10], "%Y-%m-%d")
+            except ValueError:
+                pass
+        return None
 

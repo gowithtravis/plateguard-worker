@@ -25,7 +25,7 @@ class Settings(BaseSettings):
 
     # Alerts
     resend_api_key: Optional[str] = ""
-    alert_from_email: str = "alerts@plateguard.io"
+    alert_from_email: str = "alerts@alerts.plateguard.io"
 
     # Environment
     environment: str = "development"

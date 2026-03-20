@@ -34,6 +34,8 @@ class Violation(BaseModel):
     ticket_number: str
     plate_number: str
     state: str = "MA"
+    # When known (e.g. batch checks from Supabase), used to resolve user email for alerts
+    plate_id: Optional[str] = None
     amount_due: Optional[float] = None
     violation_description: Optional[str] = None
     issue_date: Optional[datetime] = None
