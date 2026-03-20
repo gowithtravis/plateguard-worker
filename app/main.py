@@ -4,7 +4,7 @@ PlateGuard Worker — FastAPI application.
 Endpoints:
 - GET  /api/health          Health check
 - POST /api/test-alert      Send sample violation alert email (Resend)
-- POST /api/onboard         GHL waitlist signup (Auth + profile + optional plate)
+- POST /api/onboard         Public waitlist signup (CORS + rate limit; no Bearer)
 - POST /api/check-plate     Check a single plate across all portals
 - POST /api/run-batch       Check all active plates (placeholder)
 """
@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 
 import structlog
 from fastapi import Depends, FastAPI, HTTPException, Security
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from .config import settings
@@ -48,6 +49,18 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Public waitlist form on plateguard.io
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://plateguard.io",
+        "https://www.plateguard.io",
+    ],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+)
+
 
 async def verify_api_key(
     credentials: HTTPAuthorizationCredentials = Security(security),
@@ -69,6 +82,5 @@ app.include_router(
     onboard.router,
     prefix="/api",
     tags=["onboard"],
-    dependencies=[Depends(verify_api_key)],
 )
 

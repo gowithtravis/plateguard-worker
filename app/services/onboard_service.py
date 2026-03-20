@@ -1,15 +1,20 @@
 """
-GHL waitlist onboarding: Supabase Auth user, profile, optional plate.
+Public waitlist onboarding: Supabase Auth (admin API) + profiles + welcome email.
 """
 from __future__ import annotations
 
 import secrets
+from dataclasses import dataclass
 from typing import Optional
 
-import httpx
 import structlog
 
 from ..config import settings
+
+try:
+    from gotrue.errors import AuthApiError  # type: ignore
+except Exception:  # pragma: no cover
+    AuthApiError = Exception  # type: ignore[misc,assignment]
 
 try:
     from supabase import create_client  # type: ignore
@@ -29,10 +34,16 @@ class OnboardError(Exception):
         self.status_code = status_code
 
 
-class OnboardService:
-    """Create or reconcile Auth user + profile + optional plate for waitlist signups."""
+@dataclass
+class PublicWaitlistResult:
+    """Outcome of a public site waitlist signup."""
 
-    DEFAULT_PLATE_STATE = "MA"
+    user_id: str
+    already_registered: bool
+
+
+class OnboardService:
+    """Supabase Auth admin + profiles for plateguard.io waitlist signups."""
 
     def __init__(self) -> None:
         self._url = (settings.supabase_url or "").rstrip("/")
@@ -41,50 +52,23 @@ class OnboardService:
             raise OnboardError("Supabase is not configured", status_code=503)
         self._client = create_client(self._url, self._key)  # type: ignore[arg-type]
 
-    def _auth_headers(self) -> dict:
-        return {
-            "apikey": self._key,
-            "Authorization": f"Bearer {self._key}",
-            "Content-Type": "application/json",
-        }
-
     def find_auth_user_id_by_email(self, email: str) -> Optional[str]:
-        """List Auth users (admin) until a matching email is found."""
+        """List Auth users via admin API until a matching email is found."""
         normalized = email.strip().lower()
         page = 1
         per_page = 1000
 
         while True:
             try:
-                r = httpx.get(
-                    f"{self._url}/auth/v1/admin/users",
-                    params={"per_page": per_page, "page": page},
-                    headers=self._auth_headers(),
-                    timeout=60.0,
-                )
-            except httpx.RequestException as exc:
+                users = self._client.auth.admin.list_users(page=page, per_page=per_page)
+            except Exception as exc:
                 logger.error("supabase_auth_list_users_failed", error=str(exc))
                 raise OnboardError("Failed to query Supabase Auth") from exc
 
-            if r.status_code >= 400:
-                logger.error(
-                    "supabase_auth_list_users_http_error",
-                    status=r.status_code,
-                    body=r.text[:500],
-                )
-                raise OnboardError("Failed to query Supabase Auth")
-
-            body = r.json()
-            if isinstance(body, list):
-                users = body
-            else:
-                users = body.get("users") or []
             for u in users:
-                em = (u.get("email") or "").strip().lower()
+                em = (u.email or "").strip().lower()
                 if em == normalized:
-                    uid = u.get("id")
-                    if uid:
-                        return str(uid)
+                    return str(u.id)
 
             if len(users) < per_page:
                 break
@@ -92,70 +76,63 @@ class OnboardService:
 
         return None
 
-    def create_auth_user(self, email: str, first_name: str, last_name: str) -> str:
-        """Create a confirmed Auth user; on duplicate email, return existing user id."""
-        payload = {
-            "email": email.strip().lower(),
+    def create_auth_user_new(self, email: str, first_name: str, last_name: str) -> tuple[str, bool]:
+        """
+        Create user with admin create_user. Returns (user_id, created_new).
+        If email already exists, returns (existing_id, False).
+        """
+        email_clean = email.strip().lower()
+        fn = (first_name or "").strip()
+        ln = (last_name or "").strip()
+
+        attributes = {
+            "email": email_clean,
             "password": secrets.token_urlsafe(32),
             "email_confirm": True,
-            "user_metadata": {
-                "first_name": first_name.strip(),
-                "last_name": last_name.strip(),
-            },
+            "user_metadata": {"first_name": fn, "last_name": ln},
         }
+
         try:
-            r = httpx.post(
-                f"{self._url}/auth/v1/admin/users",
-                headers=self._auth_headers(),
-                json=payload,
-                timeout=60.0,
-            )
-        except httpx.RequestException as exc:
-            logger.error("supabase_auth_create_user_failed", error=str(exc))
-            raise OnboardError("Failed to create Supabase Auth user") from exc
-
-        if r.status_code in (200, 201):
-            data = r.json()
-            uid = data.get("id")
+            response = self._client.auth.admin.create_user(attributes)
+            uid = response.user.id
             if not uid:
-                logger.error("supabase_auth_create_missing_id", body=r.text[:500])
                 raise OnboardError("Invalid response from Supabase Auth")
-            return str(uid)
-
-        # Duplicate or validation: resolve existing user
-        if r.status_code in (409, 422, 400):
-            existing = self.find_auth_user_id_by_email(email)
-            if existing:
-                logger.info("onboard_auth_user_already_exists", email=email)
-                return existing
+            return str(uid), True
+        except OnboardError:
+            raise
+        except AuthApiError as exc:
+            code = getattr(exc, "code", None)
+            duplicate_codes = (
+                "email_exists",
+                "user_already_exists",
+                "identity_already_exists",
+            )
+            if code in duplicate_codes:
+                existing = self.find_auth_user_id_by_email(email_clean)
+                if existing:
+                    logger.info("onboard_auth_user_already_exists", email=email_clean)
+                    return existing, False
             logger.warning(
-                "supabase_auth_create_rejected",
-                status=r.status_code,
-                body=r.text[:500],
+                "supabase_auth_create_user_api_error",
+                code=code,
+                message=str(exc),
             )
-            raise OnboardError(
-                "Could not create user and no existing user found for this email",
-                status_code=502,
-            )
-
-        logger.error(
-            "supabase_auth_create_unexpected",
-            status=r.status_code,
-            body=r.text[:500],
-        )
-        raise OnboardError("Failed to create Supabase Auth user")
+            raise OnboardError("Failed to create Supabase Auth user") from exc
+        except Exception as exc:
+            logger.exception("supabase_auth_create_user_failed")
+            raise OnboardError("Failed to create Supabase Auth user") from exc
 
     def upsert_profile(
         self,
         user_id: str,
         email: str,
-        full_name: str,
+        full_name: Optional[str],
         phone: Optional[str],
     ) -> None:
         row = {
             "id": user_id,
             "email": email.strip().lower(),
-            "full_name": full_name.strip() or None,
+            "full_name": (full_name or "").strip() or None,
             "phone": phone.strip() if phone and phone.strip() else None,
         }
         try:
@@ -164,68 +141,30 @@ class OnboardService:
             logger.exception("profile_upsert_failed", user_id=user_id)
             raise OnboardError("Failed to upsert profile") from exc
 
-    def ensure_plate(self, user_id: str, plate_number: str) -> None:
-        """Insert plate if this user does not already have this plate+state."""
-        pn = plate_number.strip().upper()
-        if not pn:
-            return
-
-        try:
-            existing = (
-                self._client.table("plates")
-                .select("id")
-                .eq("user_id", user_id)
-                .eq("plate_number", pn)
-                .eq("state", self.DEFAULT_PLATE_STATE)
-                .limit(1)
-                .execute()
-            )
-            if existing.data:
-                logger.info(
-                    "onboard_plate_already_exists",
-                    user_id=user_id,
-                    plate_number=pn,
-                )
-                return
-
-            self._client.table("plates").insert(
-                {
-                    "user_id": user_id,
-                    "plate_number": pn,
-                    "state": self.DEFAULT_PLATE_STATE,
-                    "is_active": True,
-                }
-            ).execute()
-        except Exception as exc:
-            logger.exception("plate_insert_failed", user_id=user_id)
-            raise OnboardError("Failed to create plate") from exc
-
-    def process_waitlist_signup(
+    def process_public_waitlist_signup(
         self,
-        first_name: str,
-        last_name: str,
         email: str,
+        first_name: Optional[str],
+        last_name: Optional[str],
         phone: Optional[str],
-        plate_number: Optional[str],
-    ) -> str:
+    ) -> PublicWaitlistResult:
         """
-        Idempotent waitlist onboarding: Auth user (create or existing), profile upsert,
-        optional plate if new. Returns auth user UUID string.
+        Create or reconcile Auth user + profile for the public waitlist form.
+        Does not create plates (website flow has no plate field).
         """
         email_clean = email.strip().lower()
-        fn = first_name.strip()
-        ln = last_name.strip()
-        full_name = f"{fn} {ln}".strip()
+        fn = (first_name or "").strip()
+        ln = (last_name or "").strip()
+        full_name = f"{fn} {ln}".strip() or None
 
-        user_id = self.find_auth_user_id_by_email(email_clean)
-        if user_id:
-            logger.info("onboard_using_existing_auth_user", email=email_clean)
-        else:
-            user_id = self.create_auth_user(email_clean, fn, ln)
+        existing = self.find_auth_user_id_by_email(email_clean)
+        if existing:
+            self.upsert_profile(existing, email_clean, full_name, phone)
+            return PublicWaitlistResult(user_id=existing, already_registered=True)
 
+        user_id, created_new = self.create_auth_user_new(email_clean, fn, ln)
         self.upsert_profile(user_id, email_clean, full_name, phone)
-
-        if plate_number and plate_number.strip():
-            self.ensure_plate(user_id, plate_number)
-
-        return user_id
+        return PublicWaitlistResult(
+            user_id=user_id,
+            already_registered=not created_new,
+        )
