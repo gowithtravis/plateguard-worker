@@ -1,7 +1,15 @@
 """
 RMC Pay municipal parking portals (shared JSON API across MA cities).
 
-Each city uses the same API shape; only the host subdomain and operatorid differ.
+Each city uses the same API shape; only the host subdomain and ``operatorid`` differ.
+
+**``operator_id`` in config** is sent as the ``operatorid`` query parameter. It must match
+what that city's RMC Pay site uses (often the same as the hostname prefix, e.g. ``quincyma``
+for ``quincyma.rmcpay.com``, but not guaranteed). Confirm via browser DevTools → Network
+when running a plate search on the city's portal if lookups fail or return non-JSON.
+
+Optional per-portal key **``api_base_path``** overrides the default RMC API base path if a
+city uses a different URL layout (see logs for the exact ``url`` requested).
 """
 from __future__ import annotations
 
@@ -14,7 +22,8 @@ import requests
 logger = logging.getLogger(__name__)
 
 # City display name (stored in plates.portals & violations.source_portal) → RMC host + operatorid
-RMC_PAY_PORTALS: Dict[str, Dict[str, str]] = {
+# Optional ``api_base_path`` overrides DEFAULT_RMC_API_BASE_PATH for non-standard deployments.
+RMC_PAY_PORTALS: Dict[str, Dict[str, Any]] = {
     "Boston (RMC Pay)": {
         "host": "bostonma.rmcpay.com",
         "operator_id": "bostonma",
@@ -76,11 +85,18 @@ class RmcViolation:
     raw: Dict[str, Any]
 
 
-def _api_base_url(host: str) -> str:
+DEFAULT_RMC_API_BASE_PATH = "/rmcapi/api/violation_index.php"
+
+
+def _api_base_url(host: str, api_base_path: Optional[str] = None) -> str:
     host = host.strip().lower().rstrip("/")
     if "://" in host:
         raise ValueError("host must be a bare hostname, e.g. bostonma.rmcpay.com")
-    return f"https://{host}/rmcapi/api/violation_index.php"
+    path = (api_base_path or DEFAULT_RMC_API_BASE_PATH).strip()
+    if not path.startswith("/"):
+        path = "/" + path
+    path = path.rstrip("/")
+    return f"https://{host}{path}"
 
 
 def _build_search_params(
@@ -109,6 +125,7 @@ def search_tickets(
     *,
     host: str,
     operator_id: str,
+    api_base_path: Optional[str] = None,
     session: Optional[requests.sessions.Session] = None,
     timeout: float = 10.0,
 ) -> List[RmcViolation]:
@@ -116,7 +133,9 @@ def search_tickets(
     Search parking tickets for a plate via the RMC Pay JSON API.
 
     ``host`` is the full RMC hostname (e.g. ``bostonma.rmcpay.com``).
-    ``operator_id`` must match the city's operator id (typically the subdomain label).
+    ``operator_id`` is sent as query param ``operatorid`` and must match that portal's RMC
+    deployment (verify in Network tab if responses are not JSON).
+    ``api_base_path`` optionally overrides :data:`DEFAULT_RMC_API_BASE_PATH`.
     """
     if not plate:
         raise ValueError("plate is required")
@@ -134,11 +153,15 @@ def search_tickets(
         sess = session
 
     params = _build_search_params(plate, state, operator_id)
-    base = _api_base_url(host)
+    base = _api_base_url(host, api_base_path)
     url = f"{base}/searchviolation"
 
+    # Full URL after encoding — log before request so failures still show intent.
+    req = requests.Request("GET", url, params=params).prepare()
+    full_url = req.url
     logger.info(
-        "Requesting RMC Pay violations host=%s operator=%s plate=%s state=%s",
+        "rmc_pay_search_request url=%s host=%s operator_id=%s plate=%s state=%s",
+        full_url,
         host,
         operator_id,
         params["lpn"],
@@ -146,14 +169,32 @@ def search_tickets(
     )
 
     try:
-        resp = sess.get(url, params=params, timeout=timeout)
+        resp = sess.send(req, timeout=timeout)
     except requests.RequestException as exc:
         raise RmcParkingError(f"HTTP error talking to RMC Pay API ({host}): {exc}") from exc
+
+    # Log final URL after redirects (if any).
+    if resp.url != full_url:
+        logger.info("rmc_pay_search_response_final_url url=%s", resp.url)
 
     try:
         payload: Dict[str, Any] = resp.json()
     except ValueError as exc:
-        raise RmcParkingError(f"RMC Pay API ({host}) returned non-JSON response") from exc
+        body = resp.text or ""
+        preview = body[:500]
+        logger.error(
+            "rmc_pay_non_json_response host=%s status_code=%s url=%s content_type=%s "
+            "body_preview_first_500_chars=%r",
+            host,
+            resp.status_code,
+            resp.url,
+            resp.headers.get("Content-Type"),
+            preview,
+        )
+        raise RmcParkingError(
+            f"RMC Pay API ({host}) returned non-JSON response "
+            f"(HTTP {resp.status_code}); see worker logs for url and body preview"
+        ) from exc
 
     status = payload.get("status")
     errorcode = payload.get("errorcode")
@@ -218,6 +259,7 @@ def check_plate_tickets_for_portal(
         state,
         host=cfg["host"],
         operator_id=cfg["operator_id"],
+        api_base_path=cfg.get("api_base_path"),
         session=session,
         timeout=timeout,
     )
