@@ -1,44 +1,27 @@
+"""
+Backward-compatible entry points for the Boston RMC Pay portal.
+
+New code should use :mod:`app.portals.rmc_parking` and :data:`RMC_PAY_PORTALS`.
+"""
 from __future__ import annotations
 
-import dataclasses
-import logging
 from typing import Any, Dict, List, Optional
 
 import requests
 
+from .rmc_parking import (
+    RMC_PAY_PORTALS,
+    RmcParkingError,
+    RmcViolation,
+    check_plate_tickets_for_portal,
+    search_tickets as rmc_search_tickets,
+)
 
-logger = logging.getLogger(__name__)
+# Legacy names
+BostonParkingError = RmcParkingError
+BostonViolation = RmcViolation
 
-API_BASE_URL = "https://bostonma.rmcpay.com/rmcapi/api/violation_index.php"
-
-
-class BostonParkingError(Exception):
-    """Raised when the Boston parking lookup fails."""
-
-
-@dataclasses.dataclass
-class BostonViolation:
-    violation_id: str
-    violation_number: str
-    plate: str
-    state: str
-    raw: Dict[str, Any]
-
-
-def _build_search_params(plate: str, state: str) -> Dict[str, str]:
-    normalized_plate = plate.strip().upper()
-    normalized_state = state.strip().upper()
-
-    return {
-        "lpn": normalized_plate,
-        "stateid": normalized_state,
-        "operatorid": "bostonma",
-        "plate_type_id": "0",
-        "devicenumber": "",
-        "payment_plan_id": "",
-        "immobilization_id": "",
-        "single_violation": "false",
-    }
+_BOSTON_LABEL = "Boston (RMC Pay)"
 
 
 def search_tickets(
@@ -48,83 +31,16 @@ def search_tickets(
     session: Optional[requests.sessions.Session] = None,
     timeout: float = 10.0,
 ) -> List[BostonViolation]:
-    """
-    Search for parking tickets for a given plate and state in Boston.
-
-    This calls the public RMCPay JSON API used by the City of Boston's
-    parking portal:
-        https://bostonma.rmcpay.com/rmcapi/api/violation_index.php/searchviolation
-    """
-    if not plate:
-        raise ValueError("plate is required")
-
-    if not state:
-        raise ValueError("state is required")
-
-    sess: requests.sessions.Session
-    if session is None:
-        sess = requests.Session()
-    else:
-        sess = session
-
-    params = _build_search_params(plate, state)
-    url = f"{API_BASE_URL}/searchviolation"
-
-    logger.info(
-        "Requesting Boston parking violations for %s (%s)", params["lpn"], params["stateid"]
+    """Search Boston only (same API as :func:`rmc_parking.search_tickets`)."""
+    cfg = RMC_PAY_PORTALS[_BOSTON_LABEL]
+    return rmc_search_tickets(
+        plate,
+        state,
+        host=cfg["host"],
+        operator_id=cfg["operator_id"],
+        session=session,
+        timeout=timeout,
     )
-
-    try:
-        resp = sess.get(url, params=params, timeout=timeout)
-    except requests.RequestException as exc:
-        raise BostonParkingError(f"HTTP error talking to Boston parking API: {exc}") from exc
-
-    try:
-        payload: Dict[str, Any] = resp.json()
-    except ValueError as exc:
-        raise BostonParkingError("Boston parking API returned non-JSON response") from exc
-
-    status = payload.get("status")
-    errorcode = payload.get("errorcode")
-
-    # No tickets case: API returns status 404 + errorcode 10 with empty data array.
-    if status == 404 and errorcode == 10:
-        return []
-
-    if status != 200 or errorcode not in (0, None):
-        reason = payload.get("reason") or "Unknown error"
-        raise BostonParkingError(
-            f"Boston parking API error {status} (code {errorcode}): {reason}"
-        )
-
-    data = payload.get("data") or []
-    violations: List[BostonViolation] = []
-
-    for item in data:
-        try:
-            violation_id = str(item.get("violation_id") or "")
-            violation_number = str(item.get("violation_number") or "")
-            lpn = str(item.get("lpn") or params["lpn"])
-            stateid = str(item.get("stateid") or params["stateid"])
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.warning("Skipping malformed violation item: %r (%s)", item, exc)
-            continue
-
-        if not violation_id or not violation_number:
-            logger.debug("Skipping violation with missing ids: %r", item)
-            continue
-
-        violations.append(
-            BostonViolation(
-                violation_id=violation_id,
-                violation_number=violation_number,
-                plate=lpn,
-                state=stateid,
-                raw=item,
-            )
-        )
-
-    return violations
 
 
 def check_plate_tickets(
@@ -134,18 +50,11 @@ def check_plate_tickets(
     session: Optional[requests.sessions.Session] = None,
     timeout: float = 10.0,
 ) -> Dict[str, Any]:
-    """
-    Public helper used by the CLI.
-
-    Returns a JSON-serializable structure summarizing the search result.
-    """
-    violations = search_tickets(plate, state, session=session, timeout=timeout)
-
-    return {
-        "plate": plate.strip().upper(),
-        "state": state.strip().upper(),
-        "has_tickets": bool(violations),
-        "count": len(violations),
-        "tickets": [dataclasses.asdict(v) for v in violations],
-    }
-
+    """CLI / legacy helper — Boston RMC Pay only."""
+    return check_plate_tickets_for_portal(
+        _BOSTON_LABEL,
+        plate,
+        state,
+        session=session,
+        timeout=timeout,
+    )

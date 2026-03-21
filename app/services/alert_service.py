@@ -347,7 +347,7 @@ class AlertService:
 
         sample = Violation(
             violation_type=ViolationType.parking,
-            source_portal="boston_parking",
+            source_portal="Boston (RMC Pay)",
             ticket_number="TEST-12345",
             plate_number="SAMPLE",
             state="MA",

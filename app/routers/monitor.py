@@ -83,7 +83,7 @@ async def test_alert(request: TestAlertRequest):
 async def check_plate(request: CheckPlateRequest):
     """
     Check a single plate across specified portals.
-    For now, only Boston parking is fully wired up.
+    Checks all configured RMC Pay cities (Boston, New Bedford, Lowell, Brookline) by default.
     """
     service = MonitorService()
     result = await service.check_single_plate(

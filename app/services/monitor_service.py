@@ -15,18 +15,47 @@ import structlog
 
 from ..config import settings
 from ..models.violation import Violation, ViolationType, ViolationStatus
-from ..portals import boston_parking
+from ..portals.rmc_parking import (
+    RMC_PAY_PORTALS,
+    check_plate_tickets_for_portal,
+    default_rmc_portal_labels,
+)
 from .alert_service import AlertService
 from .violation_store import ViolationStore
 
 
 logger = structlog.get_logger()
 
+# Legacy portal token from older plates rows — expands to all RMC Pay cities.
+LEGACY_BOSTON_PORTAL = "boston_parking"
 
-PORTAL_MAP = {
-    "boston_parking": "boston_parking",
-    # "ezdrivema": "ezdrivema_tolls",  # enable when wiring up tolls
-}
+
+def normalize_plate_portals(portals: Optional[list[str]]) -> list[str]:
+    """
+    Resolve which RMC Pay portals to query.
+
+    - ``None`` / empty → all configured RMC cities.
+    - ``boston_parking`` → all RMC cities (backward compatibility).
+    - Otherwise only known RMC labels are kept; if nothing remains, all RMC cities.
+    """
+    all_rmc = default_rmc_portal_labels()
+    if portals is None or len(portals) == 0:
+        return list(all_rmc)
+
+    resolved: list[str] = []
+    for p in portals:
+        if p == LEGACY_BOSTON_PORTAL:
+            resolved.extend(all_rmc)
+        elif p in RMC_PAY_PORTALS:
+            resolved.append(p)
+
+    seen: set[str] = set()
+    out: list[str] = []
+    for x in resolved:
+        if x not in seen:
+            seen.add(x)
+            out.append(x)
+    return out if out else list(all_rmc)
 
 
 class MonitorService:
@@ -42,48 +71,48 @@ class MonitorService:
         plate_id: Optional[str] = None,
     ) -> dict:
         """Check one plate across specified (or all applicable) portals."""
-        if portals is None:
-            portals = list(PORTAL_MAP.keys())
+        to_check = normalize_plate_portals(portals)
 
         all_violations: list[Violation] = []
         new_violations: list[Violation] = []
         errors: list[str] = []
         checked: list[str] = []
 
-        for portal_name in portals:
-            if portal_name not in PORTAL_MAP:
+        for portal_name in to_check:
+            if portal_name not in RMC_PAY_PORTALS:
                 errors.append(f"Unknown portal: {portal_name}")
                 continue
 
             try:
-                if portal_name == "boston_parking":
-                    result = boston_parking.check_plate_tickets(plate_number, state)
-                    checked.append(portal_name)
+                result = check_plate_tickets_for_portal(portal_name, plate_number, state)
+                checked.append(portal_name)
 
-                    tickets = result.get("tickets", [])
-                    for ticket in tickets:
-                        violation = self._from_boston_ticket(
-                            ticket,
-                            plate_number,
-                            state,
-                            plate_id=plate_id,
-                        )
-                        all_violations.append(violation)
-
-                        is_new = await self.store.upsert_violation(violation)
-                        if is_new:
-                            new_violations.append(violation)
-
-                    await self.store.log_check(
-                        plate_number=plate_number,
-                        state=state,
-                        portal=portal_name,
-                        status="success",
-                        violations_found=len(tickets),
-                        new_violations=len(new_violations),
+                tickets = result.get("tickets", [])
+                portal_new = 0
+                for ticket in tickets:
+                    violation = self._from_rmc_ticket(
+                        ticket,
+                        plate_number,
+                        state,
+                        plate_id=plate_id,
+                        source_portal=portal_name,
                     )
-                else:
-                    errors.append(f"{portal_name}: not yet implemented")
+                    all_violations.append(violation)
+
+                    is_new = await self.store.upsert_violation(violation)
+                    if is_new:
+                        new_violations.append(violation)
+                        portal_new += 1
+
+                await self.store.log_check(
+                    plate_number=plate_number,
+                    state=state,
+                    portal=portal_name,
+                    status="success",
+                    violations_found=len(tickets),
+                    new_violations=portal_new,
+                    plate_id=plate_id,
+                )
 
                 await asyncio.sleep(settings.request_delay_seconds)
 
@@ -96,6 +125,7 @@ class MonitorService:
                     portal=portal_name,
                     status="error",
                     error_message=str(exc),
+                    plate_id=plate_id,
                 )
 
         if new_violations:
@@ -151,15 +181,17 @@ class MonitorService:
             "errors": all_errors,
         }
 
-    def _from_boston_ticket(
+    def _from_rmc_ticket(
         self,
         ticket: dict,
         plate_number: str,
         state: str,
+        *,
         plate_id: Optional[str] = None,
+        source_portal: str,
     ) -> Violation:
         """
-        Map a raw BostonParking BostonViolation dict into a Violation model.
+        Map a raw RMC Pay violation dict into a Violation model.
 
         Fills structured fields when RMCPay-style keys exist; full payload stays in raw_data.
         """
@@ -203,7 +235,7 @@ class MonitorService:
 
         return Violation(
             violation_type=ViolationType.parking,
-            source_portal="boston_parking",
+            source_portal=source_portal,
             ticket_number=ticket_number,
             plate_number=plate_number,
             state=state,
