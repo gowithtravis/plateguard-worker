@@ -8,7 +8,7 @@ from typing import Optional
 
 import structlog
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 from ..config import settings
 from ..rate_limit import enforce_onboard_rate_limit
@@ -27,6 +27,34 @@ class OnboardRequest(BaseModel):
     first_name: Optional[str] = Field(default=None, max_length=200)
     last_name: Optional[str] = Field(default=None, max_length=200)
     phone: Optional[str] = Field(default=None, max_length=50)
+    dob_mmdd: Optional[str] = Field(
+        default=None,
+        max_length=10,
+        description="Optional MM/DD for Cambridge (eTIMS) plate lookup",
+    )
+
+    @field_validator("dob_mmdd", mode="before")
+    @classmethod
+    def _strip_dob_mmdd(cls, v: object) -> Optional[str]:
+        if v is None:
+            return None
+        s = str(v).strip()
+        return s or None
+
+    @field_validator("dob_mmdd")
+    @classmethod
+    def _validate_dob_mmdd(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        import re
+
+        m = re.match(r"^(\d{1,2})/(\d{1,2})$", v)
+        if not m:
+            raise ValueError("dob_mmdd must be MM/DD (e.g. 03/15)")
+        mm, dd = int(m.group(1)), int(m.group(2))
+        if mm < 1 or mm > 12 or dd < 1 or dd > 31:
+            raise ValueError("dob_mmdd has invalid month or day")
+        return f"{mm:02d}/{dd:02d}"
 
 
 class OnboardResponse(BaseModel):
@@ -65,6 +93,7 @@ async def onboard_public_waitlist(request: Request, body: OnboardRequest):
             fn,
             ln,
             phone,
+            body.dob_mmdd,
         )
     except OnboardError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc

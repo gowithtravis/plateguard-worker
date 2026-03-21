@@ -128,12 +128,14 @@ class OnboardService:
         email: str,
         full_name: Optional[str],
         phone: Optional[str],
+        dob_mmdd: Optional[str] = None,
     ) -> None:
         row = {
             "id": user_id,
             "email": email.strip().lower(),
             "full_name": (full_name or "").strip() or None,
             "phone": phone.strip() if phone and phone.strip() else None,
+            "dob_mmdd": dob_mmdd.strip() if dob_mmdd and dob_mmdd.strip() else None,
         }
         try:
             self._client.table("profiles").upsert(row, on_conflict="id").execute()
@@ -147,6 +149,7 @@ class OnboardService:
         first_name: Optional[str],
         last_name: Optional[str],
         phone: Optional[str],
+        dob_mmdd: Optional[str] = None,
     ) -> PublicWaitlistResult:
         """
         Create or reconcile Auth user + profile for the public waitlist form.
@@ -159,11 +162,11 @@ class OnboardService:
 
         existing = self.find_auth_user_id_by_email(email_clean)
         if existing:
-            self.upsert_profile(existing, email_clean, full_name, phone)
+            self.upsert_profile(existing, email_clean, full_name, phone, dob_mmdd)
             return PublicWaitlistResult(user_id=existing, already_registered=True)
 
         user_id, created_new = self.create_auth_user_new(email_clean, fn, ln)
-        self.upsert_profile(user_id, email_clean, full_name, phone)
+        self.upsert_profile(user_id, email_clean, full_name, phone, dob_mmdd)
         return PublicWaitlistResult(
             user_id=user_id,
             already_registered=not created_new,

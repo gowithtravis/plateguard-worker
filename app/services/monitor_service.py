@@ -15,6 +15,11 @@ import structlog
 
 from ..config import settings
 from ..models.violation import Violation, ViolationType, ViolationStatus
+from ..portals.cambridge_etims import (
+    CAMBRIDGE_PORTAL_LABEL,
+    browserbase_configured,
+    search_violations_sync,
+)
 from ..portals.rmc_parking import (
     RMC_PAY_PORTALS,
     check_plate_tickets_for_portal,
@@ -32,21 +37,22 @@ LEGACY_BOSTON_PORTAL = "boston_parking"
 
 def normalize_plate_portals(portals: Optional[list[str]]) -> list[str]:
     """
-    Resolve which RMC Pay portals to query.
+    Resolve which portals to query (RMC Pay cities + Cambridge eTIMS).
 
-    - ``None`` / empty → all configured RMC cities.
-    - ``boston_parking`` → all RMC cities (backward compatibility).
-    - Otherwise only known RMC labels are kept; if nothing remains, all RMC cities.
+    - ``None`` / empty → all RMC cities plus Cambridge (eTIMS).
+    - ``boston_parking`` → same full default set (backward compatibility).
+    - Otherwise only known labels are kept; if nothing remains, full default set.
     """
     all_rmc = default_rmc_portal_labels()
+    default_all = list(all_rmc) + [CAMBRIDGE_PORTAL_LABEL]
     if portals is None or len(portals) == 0:
-        return list(all_rmc)
+        return list(default_all)
 
     resolved: list[str] = []
     for p in portals:
         if p == LEGACY_BOSTON_PORTAL:
-            resolved.extend(all_rmc)
-        elif p in RMC_PAY_PORTALS:
+            resolved.extend(default_all)
+        elif p in RMC_PAY_PORTALS or p == CAMBRIDGE_PORTAL_LABEL:
             resolved.append(p)
 
     seen: set[str] = set()
@@ -55,7 +61,7 @@ def normalize_plate_portals(portals: Optional[list[str]]) -> list[str]:
         if x not in seen:
             seen.add(x)
             out.append(x)
-    return out if out else list(all_rmc)
+    return out if out else list(default_all)
 
 
 class MonitorService:
@@ -69,6 +75,7 @@ class MonitorService:
         state: str = "MA",
         portals: Optional[list[str]] = None,
         plate_id: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> dict:
         """Check one plate across specified (or all applicable) portals."""
         to_check = normalize_plate_portals(portals)
@@ -79,6 +86,72 @@ class MonitorService:
         checked: list[str] = []
 
         for portal_name in to_check:
+            if portal_name == CAMBRIDGE_PORTAL_LABEL:
+                if not browserbase_configured():
+                    logger.warning(
+                        "cambridge_skipped_browserbase_not_configured",
+                        plate_number=plate_number,
+                    )
+                    continue
+                if not user_id:
+                    logger.warning(
+                        "cambridge_skipped_no_user_id",
+                        plate_number=plate_number,
+                    )
+                    continue
+                dob_mmdd = self.store.get_profile_dob_mmdd_sync(user_id)
+                if not dob_mmdd:
+                    logger.warning(
+                        "cambridge_skipped_no_dob_mmdd",
+                        user_id=user_id,
+                        plate_number=plate_number,
+                    )
+                    continue
+                try:
+                    tickets = await asyncio.to_thread(
+                        search_violations_sync,
+                        plate_number,
+                        state,
+                        dob_mmdd,
+                    )
+                    checked.append(portal_name)
+                    portal_new = 0
+                    for ticket in tickets:
+                        violation = self._from_rmc_ticket(
+                            ticket,
+                            plate_number,
+                            state,
+                            plate_id=plate_id,
+                            source_portal=portal_name,
+                        )
+                        all_violations.append(violation)
+                        is_new = await self.store.upsert_violation(violation)
+                        if is_new:
+                            new_violations.append(violation)
+                            portal_new += 1
+                    await self.store.log_check(
+                        plate_number=plate_number,
+                        state=state,
+                        portal=portal_name,
+                        status="success",
+                        violations_found=len(tickets),
+                        new_violations=portal_new,
+                        plate_id=plate_id,
+                    )
+                    await asyncio.sleep(settings.request_delay_seconds)
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.error("portal_check_failed", portal=portal_name, error=str(exc))
+                    errors.append(f"{portal_name}: {exc}")
+                    await self.store.log_check(
+                        plate_number=plate_number,
+                        state=state,
+                        portal=portal_name,
+                        status="error",
+                        error_message=str(exc),
+                        plate_id=plate_id,
+                    )
+                continue
+
             if portal_name not in RMC_PAY_PORTALS:
                 errors.append(f"Unknown portal: {portal_name}")
                 continue
@@ -157,6 +230,7 @@ class MonitorService:
                     state=plate.get("state", "MA"),
                     portals=plate.get("portals"),
                     plate_id=str(plate["id"]) if plate.get("id") is not None else None,
+                    user_id=str(plate["user_id"]) if plate.get("user_id") else None,
                 )
 
         tasks = [check_with_semaphore(plate) for plate in plates]

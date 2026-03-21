@@ -41,6 +41,29 @@ class ViolationStore:
         )
         return response.data
 
+    def get_profile_dob_mmdd_sync(self, user_id: str) -> Optional[str]:
+        """Return ``profiles.dob_mmdd`` (MM/DD) for Cambridge eTIMS plate search."""
+        if not self.client:
+            return None
+        try:
+            response = (
+                self.client.table("profiles")
+                .select("dob_mmdd")
+                .eq("id", user_id)
+                .limit(1)
+                .execute()
+            )
+        except Exception as exc:  # pragma: no cover
+            logger.warning("profile_dob_fetch_failed", user_id=user_id, error=str(exc))
+            return None
+        if not response.data:
+            return None
+        raw = response.data[0].get("dob_mmdd")
+        if raw is None:
+            return None
+        s = str(raw).strip()
+        return s or None
+
     async def upsert_violation(self, violation: Any) -> bool:
         """
         Insert or update a violation.
