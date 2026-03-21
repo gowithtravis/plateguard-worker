@@ -5,7 +5,7 @@ from typing import Optional
 
 import structlog
 from fastapi import APIRouter, BackgroundTasks, HTTPException
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 
 from ..config import settings
 from ..services.alert_service import AlertService
@@ -40,6 +40,8 @@ class BatchResponse(BaseModel):
     total_violations: int
     new_violations: int
     errors: list[str]
+    manual_ticket_rechecks: int = 0
+    manual_ticket_recheck_errors: list[str] = Field(default_factory=list)
 
 
 class TestAlertRequest(BaseModel):
@@ -112,6 +114,8 @@ async def run_batch(request: RunBatchRequest, background_tasks: BackgroundTasks)
             total_violations=0,
             new_violations=0,
             errors=["Running in background — check logs for results"],
+            manual_ticket_rechecks=0,
+            manual_ticket_recheck_errors=[],
         )
 
     service = MonitorService()

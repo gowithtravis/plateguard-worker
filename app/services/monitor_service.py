@@ -21,10 +21,19 @@ from ..portals.cambridge_etims import (
     search_violations_sync,
     twocaptcha_configured,
 )
+from ..portals.kelley_ryan import (
+    KELLEY_RYAN_PORTAL,
+    search_parking_ticket as kelley_ryan_search_ticket,
+)
+from ..portals.manual_ticket_portals import MANUAL_TICKET_PORTAL_LABELS
 from ..portals.rmc_parking import (
     RMC_PAY_PORTALS,
     check_plate_tickets_for_portal,
     default_rmc_portal_labels,
+)
+from ..portals.somerville_chs import (
+    SOMERVILLE_CHS_PORTAL,
+    search_parking_ticket as somerville_chs_search_ticket,
 )
 from .alert_service import AlertService
 from .violation_store import ViolationStore
@@ -43,6 +52,9 @@ def normalize_plate_portals(portals: Optional[list[str]]) -> list[str]:
     - ``None`` / empty → all RMC cities plus Cambridge (eTIMS).
     - ``boston_parking`` → same full default set (backward compatibility).
     - Otherwise only known labels are kept; if nothing remains, full default set.
+
+    Ticket-number-only portals (``kelley_ryan``, ``somerville_chs``) are supported for
+    manual reporting but are **never** included here — they are rechecked separately.
     """
     all_rmc = default_rmc_portal_labels()
     default_all = list(all_rmc) + [CAMBRIDGE_PORTAL_LABEL]
@@ -51,6 +63,8 @@ def normalize_plate_portals(portals: Optional[list[str]]) -> list[str]:
 
     resolved: list[str] = []
     for p in portals:
+        if p in MANUAL_TICKET_PORTAL_LABELS:
+            continue
         if p == LEGACY_BOSTON_PORTAL:
             resolved.extend(default_all)
         elif p in RMC_PAY_PORTALS or p == CAMBRIDGE_PORTAL_LABEL:
@@ -220,6 +234,197 @@ class MonitorService:
             "errors": errors,
         }
 
+    async def submit_manual_ticket_report(
+        self,
+        *,
+        user_id: str,
+        plate_id: str,
+        ticket_number: str,
+        city: str,
+        portal_type: str,
+    ) -> dict:
+        """
+        Validate a ticket against Kelley & Ryan or Somerville CHS and persist a violation.
+
+        ``city`` is required for ``kelley_ryan`` (municipality name or numeric town id).
+        For ``somerville_chs``, ``city`` is optional but should reference Somerville.
+        """
+        if portal_type not in (KELLEY_RYAN_PORTAL, SOMERVILLE_CHS_PORTAL):
+            raise ValueError(f"Unsupported portal_type: {portal_type!r}")
+
+        if not self.store.verify_plate_belongs_to_user_sync(plate_id, user_id):
+            raise PermissionError("Plate does not belong to the given user_id")
+
+        plate_row = self.store.get_plate_row_sync(plate_id)
+        if not plate_row:
+            raise ValueError("Plate not found")
+
+        plate_number = str(plate_row["plate_number"])
+        state = str(plate_row.get("state") or "MA")
+
+        if portal_type == KELLEY_RYAN_PORTAL:
+            result = await asyncio.to_thread(
+                kelley_ryan_search_ticket,
+                city,
+                plate_number,
+                ticket_number,
+            )
+            if not result.found or not result.details:
+                return {"ok": False, "error": "Ticket not found on Kelley & Ryan portal"}
+
+            merged_raw: dict = {
+                **result.details,
+                "manual_submission": True,
+                "city": city.strip(),
+                "portal_type": portal_type,
+            }
+            if result.raw_html_excerpt:
+                merged_raw["result_html_excerpt"] = result.raw_html_excerpt
+
+            violation = self._from_rmc_ticket(
+                merged_raw,
+                plate_number,
+                state,
+                plate_id=plate_id,
+                source_portal=KELLEY_RYAN_PORTAL,
+            )
+            violation.status = self._violation_status_from_payload(merged_raw)
+            is_new = await self.store.upsert_violation(violation)
+            return {
+                "ok": True,
+                "new_violation": is_new,
+                "ticket_number": ticket_number,
+                "source_portal": KELLEY_RYAN_PORTAL,
+                **self._violation_summary_dict(violation),
+            }
+
+        # somerville_chs
+        result = await asyncio.to_thread(
+            somerville_chs_search_ticket,
+            plate_number,
+            ticket_number,
+        )
+        if not result.found or not result.details:
+            return {"ok": False, "error": "Ticket not found on Somerville (City Hall Systems) portal"}
+
+        merged_raw = {
+            **result.details,
+            "manual_submission": True,
+            "city": (city or "Somerville").strip(),
+            "portal_type": portal_type,
+        }
+        if result.raw_html_excerpt:
+            merged_raw["result_html_excerpt"] = result.raw_html_excerpt
+        if result.final_url:
+            merged_raw["final_url"] = result.final_url
+
+        violation = self._from_rmc_ticket(
+            merged_raw,
+            plate_number,
+            state,
+            plate_id=plate_id,
+            source_portal=SOMERVILLE_CHS_PORTAL,
+        )
+        violation.status = self._violation_status_from_payload(merged_raw)
+        is_new = await self.store.upsert_violation(violation)
+        return {
+            "ok": True,
+            "new_violation": is_new,
+            "ticket_number": ticket_number,
+            "source_portal": SOMERVILLE_CHS_PORTAL,
+            **self._violation_summary_dict(violation),
+        }
+
+    async def recheck_manual_portal_violations(self) -> dict:
+        """
+        Refresh violations stored under ticket-number-only portals (amount/status).
+        """
+        rows = self.store.get_manual_portal_violations_sync()
+        errors: list[str] = []
+        checked = 0
+
+        for row in rows:
+            portal = row.get("source_portal")
+            ticket = str(row.get("ticket_number") or "").strip()
+            plate = str(row.get("plate_number") or "").strip()
+            state = str(row.get("state") or "MA")
+            plate_id = str(row["plate_id"]) if row.get("plate_id") else None
+            prev_raw = row.get("raw_data") or {}
+
+            if not ticket or not plate or not portal:
+                continue
+
+            try:
+                if portal == KELLEY_RYAN_PORTAL:
+                    city = (prev_raw.get("city") or prev_raw.get("manual_report_city") or "").strip()
+                    if not city:
+                        errors.append(
+                            f"kelley_ryan ticket {ticket}: missing city in violation raw_data; skipping recheck"
+                        )
+                        continue
+                    result = await asyncio.to_thread(
+                        kelley_ryan_search_ticket,
+                        city,
+                        plate,
+                        ticket,
+                    )
+                elif portal == SOMERVILLE_CHS_PORTAL:
+                    result = await asyncio.to_thread(
+                        somerville_chs_search_ticket,
+                        plate,
+                        ticket,
+                    )
+                else:
+                    continue
+
+                if not result.found or not getattr(result, "details", None):
+                    errors.append(
+                        f"{portal} ticket {ticket}: not found on portal during recheck (may be paid or removed)"
+                    )
+                    continue
+
+                checked += 1
+
+                merged_raw = {**prev_raw, **result.details, "manual_submission": True}
+                if getattr(result, "raw_html_excerpt", None):
+                    merged_raw["result_html_excerpt"] = result.raw_html_excerpt
+                if portal == SOMERVILLE_CHS_PORTAL and getattr(result, "final_url", None):
+                    merged_raw["final_url"] = result.final_url
+
+                violation = self._from_rmc_ticket(
+                    merged_raw,
+                    plate,
+                    state,
+                    plate_id=plate_id,
+                    source_portal=portal,
+                )
+                violation.status = self._violation_status_from_payload(merged_raw)
+                await self.store.upsert_violation(violation)
+
+                await self.store.log_check(
+                    plate_number=plate,
+                    state=state,
+                    portal=portal,
+                    status="success",
+                    violations_found=1,
+                    new_violations=0,
+                    plate_id=plate_id,
+                )
+                await asyncio.sleep(settings.request_delay_seconds)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.error("manual_portal_recheck_failed", portal=portal, ticket=ticket, error=str(exc))
+                errors.append(f"{portal} ticket {ticket}: {exc}")
+                await self.store.log_check(
+                    plate_number=plate,
+                    state=state,
+                    portal=portal,
+                    status="error",
+                    error_message=str(exc),
+                    plate_id=plate_id,
+                )
+
+        return {"manual_ticket_rechecks": checked, "manual_ticket_recheck_errors": errors}
+
     async def check_all_active_plates(self) -> dict:
         """
         Check all active plates in the database.
@@ -255,11 +460,28 @@ class MonitorService:
                 total_new += result["new_violations"]
                 all_errors.extend(result["errors"])
 
+        manual = await self.recheck_manual_portal_violations()
+        all_errors.extend(manual.get("manual_ticket_recheck_errors", []))
+
         return {
             "plates_checked": len(plates),
             "total_violations": total_violations,
             "new_violations": total_new,
             "errors": all_errors,
+            "manual_ticket_rechecks": manual.get("manual_ticket_rechecks", 0),
+            "manual_ticket_recheck_errors": manual.get("manual_ticket_recheck_errors", []),
+        }
+
+    @staticmethod
+    def _violation_summary_dict(violation: Violation) -> dict:
+        st = violation.status
+        status_str = st.value if isinstance(st, ViolationStatus) else str(st)
+        return {
+            "amount_due": violation.amount_due,
+            "status": status_str,
+            "violation_description": violation.violation_description,
+            "location": violation.location,
+            "due_date": violation.due_date.isoformat() if violation.due_date else None,
         }
 
     def _from_rmc_ticket(
@@ -328,6 +550,29 @@ class MonitorService:
             status=ViolationStatus.open,
             raw_data=ticket,
         )
+
+    def _violation_status_from_payload(self, payload: dict) -> ViolationStatus:
+        """Infer paid/open from scraper text fields."""
+        text_bits: list[str] = []
+        st = payload.get("status_text")
+        if st:
+            text_bits.append(str(st))
+        for k, v in (payload.get("kv_pairs") or {}).items():
+            if "status" in str(k).lower():
+                text_bits.append(str(v))
+        blob = " ".join(text_bits).lower()
+        if "paid" in blob or "satisfied" in blob or "closed" in blob:
+            return ViolationStatus.paid
+        amount = self._coerce_float(
+            payload.get("amount_due")
+            or payload.get("balance")
+            or payload.get("fine_amount")
+        )
+        if amount is not None and amount <= 0:
+            return ViolationStatus.paid
+        if "past due" in blob or "delinquent" in blob:
+            return ViolationStatus.past_due
+        return ViolationStatus.open
 
     @staticmethod
     def _coerce_float(value: object) -> Optional[float]:

@@ -7,6 +7,7 @@ Endpoints:
 - POST /api/onboard                    Public waitlist signup (CORS + rate limit; no Bearer)
 - POST /api/check-plate                Check a single plate across all portals
 - POST /api/run-batch                  Check all active plates (placeholder)
+- POST /api/report-ticket              Manual ticket report (Kelley & Ryan / Somerville CHS; Supabase JWT)
 - POST /api/create-checkout-session    Stripe Checkout (Supabase JWT Bearer)
 - POST /api/create-billing-portal-session  Stripe Billing Portal (Supabase JWT Bearer)
 - POST /api/stripe-webhook             Stripe webhooks (signature only; no Bearer)
@@ -19,7 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from .config import settings
-from .routers import billing, health, monitor, onboard
+from .routers import billing, health, monitor, onboard, tickets
 
 
 logger = structlog.get_logger()
@@ -81,6 +82,11 @@ app.include_router(
     prefix="/api",
     tags=["monitor"],
     dependencies=[Depends(verify_api_key)],
+)
+app.include_router(
+    tickets.router,
+    prefix="/api",
+    tags=["tickets"],
 )
 app.include_router(
     onboard.router,

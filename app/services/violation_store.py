@@ -11,6 +11,7 @@ from typing import Any, Optional
 import structlog
 
 from ..config import settings
+from ..portals.manual_ticket_portals import MANUAL_TICKET_PORTAL_LABELS
 
 try:
     from supabase import create_client  # type: ignore
@@ -64,37 +65,143 @@ class ViolationStore:
         s = str(raw).strip()
         return s or None
 
+    def _violation_to_row(self, violation: Any) -> dict[str, Any]:
+        """Map a :class:`~app.models.violation.Violation` into Supabase column names."""
+        vt = getattr(violation, "violation_type", None)
+        st = getattr(violation, "status", None)
+        issue = getattr(violation, "issue_date", None)
+        due = getattr(violation, "due_date", None)
+
+        def _enum_val(x: Any) -> Optional[str]:
+            if x is None:
+                return None
+            return x.value if hasattr(x, "value") else str(x)
+
+        row: dict[str, Any] = {
+            "source_portal": getattr(violation, "source_portal", None),
+            "ticket_number": getattr(violation, "ticket_number", None),
+            "plate_id": getattr(violation, "plate_id", None),
+            "plate_number": getattr(violation, "plate_number", None),
+            "state": getattr(violation, "state", None) or "MA",
+            "violation_type": _enum_val(vt),
+            "amount_due": getattr(violation, "amount_due", None),
+            "violation_description": getattr(violation, "violation_description", None),
+            "issue_date": issue.isoformat() if issue else None,
+            "location": getattr(violation, "location", None),
+            "status": _enum_val(st),
+            "due_date": due.isoformat() if due else None,
+            "late_fee_amount": getattr(violation, "late_fee_amount", None),
+            "raw_data": getattr(violation, "raw_data", None) or {},
+            "last_checked_at": datetime.now(timezone.utc).isoformat(),
+        }
+        return {k: v for k, v in row.items() if v is not None}
+
     async def upsert_violation(self, violation: Any) -> bool:
         """
-        Insert or update a violation.
-        Returns True if this is a NEW violation (placeholder logic).
+        Insert or update a violation (matched on ``source_portal`` + ``ticket_number``).
+
+        Returns True if a new row was inserted, False if an existing row was updated.
         """
         if not self.client:
+            return False
+
+        source_portal = getattr(violation, "source_portal", None)
+        ticket_number = getattr(violation, "ticket_number", None)
+        if not source_portal or not ticket_number:
+            logger.warning(
+                "violation_upsert_skipped_missing_keys",
+                source_portal=source_portal,
+                ticket_number=ticket_number,
+            )
             return False
 
         existing = (
             self.client.table("violations")
             .select("id")
-            .eq("source_portal", getattr(violation, "source_portal", None))
-            .eq("ticket_number", getattr(violation, "ticket_number", None))
+            .eq("source_portal", source_portal)
+            .eq("ticket_number", ticket_number)
             .execute()
         )
 
-        violation_data = {
-            "raw_data": getattr(violation, "raw_data", {}),
-            "last_checked_at": datetime.now(timezone.utc).isoformat(),
-        }
+        violation_data = self._violation_to_row(violation)
+        # Always refresh raw_data + last_checked_at even if other fields were omitted
+        violation_data["raw_data"] = getattr(violation, "raw_data", None) or {}
+        violation_data["last_checked_at"] = datetime.now(timezone.utc).isoformat()
 
         if existing.data:
             self.client.table("violations").update(violation_data).eq(
                 "id", existing.data[0]["id"]
             ).execute()
-            logger.info("violation_updated")
+            logger.info("violation_updated", ticket_number=ticket_number, portal=source_portal)
             return False
 
         self.client.table("violations").insert(violation_data).execute()
-        logger.info("violation_new")
+        logger.info("violation_new", ticket_number=ticket_number, portal=source_portal)
         return True
+
+    def verify_plate_belongs_to_user_sync(self, plate_id: str, user_id: str) -> bool:
+        """Return True if ``plates.id`` is owned by ``profiles.id`` / auth user."""
+        if not self.client:
+            return False
+        try:
+            response = (
+                self.client.table("plates")
+                .select("id")
+                .eq("id", plate_id)
+                .eq("user_id", user_id)
+                .limit(1)
+                .execute()
+            )
+        except Exception as exc:  # pragma: no cover
+            logger.warning(
+                "plate_owner_check_failed",
+                plate_id=plate_id,
+                user_id=user_id,
+                error=str(exc),
+            )
+            return False
+        return bool(response.data)
+
+    def get_plate_row_sync(self, plate_id: str) -> Optional[dict[str, Any]]:
+        """Fetch a single plate row (for manual ticket reporting)."""
+        if not self.client:
+            return None
+        try:
+            response = (
+                self.client.table("plates")
+                .select("id, plate_number, state, user_id")
+                .eq("id", plate_id)
+                .limit(1)
+                .execute()
+            )
+        except Exception as exc:  # pragma: no cover
+            logger.warning("plate_fetch_failed", plate_id=plate_id, error=str(exc))
+            return None
+        if not response.data:
+            return None
+        return response.data[0]
+
+    def get_manual_portal_violations_sync(self) -> list[dict[str, Any]]:
+        """
+        Violations stored under ticket-number-only portals (Kelley & Ryan, Somerville CHS).
+
+        Used by the batch monitor to refresh amounts/status for manually reported tickets.
+        """
+        if not self.client:
+            return []
+        try:
+            response = (
+                self.client.table("violations")
+                .select(
+                    "id, plate_id, plate_number, state, ticket_number, source_portal, amount_due, status, raw_data"
+                )
+                .in_("source_portal", sorted(MANUAL_TICKET_PORTAL_LABELS))
+                .execute()
+            )
+        except Exception as exc:  # pragma: no cover
+            logger.warning("manual_portal_violations_fetch_failed", error=str(exc))
+            return []
+        return list(response.data or [])
 
     async def log_check(
         self,
