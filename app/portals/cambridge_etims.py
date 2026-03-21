@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import base64
 import re
-from typing import Any, Dict, List
+import time
+from typing import Any, Dict, List, Tuple
 from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 import structlog
@@ -181,6 +182,81 @@ def _fill_plate_fields(page: Any, plate: str, st: str, mm: str, dd: str) -> None
     page.locator("#birthDay").select_option(dd)
 
 
+def _captcha_text_input(page: Any) -> Tuple[Any, str]:
+    """
+    Resolve the CAPTCHA answer field. The server uses a random ``name``/``id`` each
+    load (e.g. ``LRGQLD``) but keeps ``class="captchaDynamic"``. Prefer the field
+    inside ``form[name=inputForm]`` so we never pick a stray input elsewhere.
+    """
+    specs: List[Tuple[str, str]] = [
+        ('form[name="inputForm"] input.captchaDynamic', "form[name=inputForm] input.captchaDynamic"),
+        ("input.captchaDynamic", "input.captchaDynamic"),
+        (
+            "xpath=//img[@id='captcha']/following::input[not(@type='hidden')][1]",
+            "xpath=//img[@id='captcha']/following::input[1]",
+        ),
+    ]
+    for css_or_xpath, desc in specs:
+        loc = page.locator(css_or_xpath)
+        try:
+            if loc.count() > 0:
+                return loc.first, desc
+        except Exception:
+            continue
+    raise CambridgeEtimError("Could not locate Cambridge CAPTCHA text input")
+
+
+def _form_field_snapshot(page: Any) -> Dict[str, Any]:
+    """Read key form values from the live DOM (for debug logging)."""
+    return page.evaluate(
+        """() => {
+            const f = document.forms.inputForm || document.querySelector('form[name="inputForm"]');
+            if (!f) return { error: "inputForm not found" };
+            const cap = f.querySelector("input.captchaDynamic");
+            return {
+                ticketNumber: f.elements.ticketNumber?.value ?? null,
+                statePlate: f.elements.statePlate?.value ?? null,
+                plateNumber: f.elements.plateNumber?.value ?? null,
+                birthMonth: f.elements.birthMonth?.value ?? null,
+                birthDay: f.elements.birthDay?.value ?? null,
+                plateType: f.elements.plateType?.value ?? null,
+                requestType: f.elements.requestType?.value ?? null,
+                captchaInputName: cap?.getAttribute("name") ?? null,
+                captchaInputId: cap?.id ?? null,
+                captchaInputClass: cap?.className ?? null,
+                captchaValue: cap?.value ?? null,
+            };
+        }"""
+    )
+
+
+def _visible_page_errors(page: Any) -> List[str]:
+    """Collect likely error/alert text visible after submit."""
+    raw = page.evaluate(
+        """() => {
+            const texts = [];
+            const sel = [
+                ".error", ".alert", ".alert-danger", ".alert-warning",
+                "[role='alert']", ".validationError", ".errormsg",
+                "font[color='red']", ".text-danger", "#errorMessage"
+            ].join(", ");
+            document.querySelectorAll(sel).forEach((el) => {
+                const t = (el.textContent || "").trim().replace(/\\s+/g, " ");
+                if (t.length > 2 && t.length < 800) texts.push(t);
+            });
+            return [...new Set(texts)];
+        }"""
+    )
+    return list(raw) if isinstance(raw, list) else []
+
+
+def _save_submit_debug_screenshot(page: Any, session_id: str, attempt: int) -> str:
+    safe = re.sub(r"[^\w.-]+", "_", str(session_id))[:72]
+    path = f"/tmp/cambridge_etims_{safe}_a{attempt}_{int(time.time() * 1000)}.png"
+    page.screenshot(path=path, full_page=True)
+    return path
+
+
 def _solve_captcha_with_2captcha(
     page: Any,
     solver: Any,
@@ -231,15 +307,106 @@ def _solve_captcha_with_2captcha(
     return text
 
 
-def _fill_captcha_input_and_submit(page: Any, solution: str, timeout_ms: int) -> None:
-    inp = page.locator("input.captchaDynamic").first
-    inp.wait_for(state="visible", timeout=30_000)
-    inp.fill("")
-    inp.fill(solution)
+def _fill_captcha_input_and_submit(
+    page: Any,
+    solution: str,
+    timeout_ms: int,
+    *,
+    attempt: int,
+    session_id: str,
+) -> None:
+    captcha_inp, selector_desc = _captcha_text_input(page)
+    captcha_inp.wait_for(state="visible", timeout=30_000)
+    captcha_inp.fill("")
+    captcha_inp.fill(solution.strip())
+
+    filled_value = ""
+    try:
+        filled_value = captcha_inp.input_value()
+    except Exception:
+        pass
+
+    handle = captcha_inp.element_handle()
+    meta: Dict[str, Any] = {}
+    if handle:
+        try:
+            meta = page.evaluate(
+                """(el) => ({
+                    tag: el.tagName,
+                    id: el.id || null,
+                    name: el.name || null,
+                    type: el.type || null,
+                    className: el.className || null,
+                    value: el.value || "",
+                    readOnly: el.readOnly,
+                    disabled: el.disabled,
+                })""",
+                handle,
+            )
+        except Exception:
+            meta = {}
+
+    logger.info(
+        "cambridge_captcha_field_after_fill",
+        attempt=attempt,
+        session_id=session_id,
+        playwright_selector=selector_desc,
+        input_value_from_playwright=filled_value,
+        input_value_length=len(filled_value),
+        dom_field=meta,
+    )
+
+    snapshot = _form_field_snapshot(page)
+    logger.info(
+        "cambridge_form_values_before_submit",
+        attempt=attempt,
+        session_id=session_id,
+        form=snapshot,
+    )
 
     page.locator('input[type="submit"][name="submit"]').click()
     page.wait_for_load_state("domcontentloaded", timeout=timeout_ms)
     page.wait_for_timeout(2000)
+
+    after_url = page.url
+    logger.info(
+        "cambridge_after_submit",
+        attempt=attempt,
+        session_id=session_id,
+        url=after_url,
+    )
+
+    try:
+        shot_path = _save_submit_debug_screenshot(page, session_id, attempt)
+        logger.info(
+            "cambridge_submit_debug_screenshot",
+            attempt=attempt,
+            session_id=session_id,
+            path=shot_path,
+        )
+    except Exception as exc:
+        logger.warning(
+            "cambridge_submit_debug_screenshot_failed",
+            attempt=attempt,
+            session_id=session_id,
+            error=str(exc),
+        )
+
+    errors = _visible_page_errors(page)
+    if errors:
+        logger.info(
+            "cambridge_visible_errors_after_submit",
+            attempt=attempt,
+            session_id=session_id,
+            messages=errors,
+        )
+    else:
+        logger.info(
+            "cambridge_visible_errors_after_submit",
+            attempt=attempt,
+            session_id=session_id,
+            messages=[],
+        )
 
 
 def search_violations_sync(
@@ -323,7 +490,13 @@ def search_violations_sync(
                         attempt=attempt,
                         session_id=session.id,
                     )
-                    _fill_captcha_input_and_submit(page, solution, timeout_ms)
+                    _fill_captcha_input_and_submit(
+                        page,
+                        solution,
+                        timeout_ms,
+                        attempt=attempt,
+                        session_id=session.id,
+                    )
                     html = page.content()
 
                     if not _still_on_search_form(page):
