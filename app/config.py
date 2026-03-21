@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     resend_api_key: Optional[str] = ""
     alert_from_email: str = "alerts@alerts.plateguard.io"
 
+    # Stripe (Checkout, Billing Portal, webhooks)
+    stripe_secret_key: Optional[str] = None
+    stripe_webhook_secret: Optional[str] = None
+
     # Environment
     environment: str = "development"
     log_level: str = "INFO"

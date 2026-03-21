@@ -2,11 +2,14 @@
 PlateGuard Worker — FastAPI application.
 
 Endpoints:
-- GET  /api/health          Health check
-- POST /api/test-alert      Send sample violation alert email (Resend)
-- POST /api/onboard         Public waitlist signup (CORS + rate limit; no Bearer)
-- POST /api/check-plate     Check a single plate across all portals
-- POST /api/run-batch       Check all active plates (placeholder)
+- GET  /api/health                     Health check
+- POST /api/test-alert                 Send sample violation alert email (Resend)
+- POST /api/onboard                    Public waitlist signup (CORS + rate limit; no Bearer)
+- POST /api/check-plate                Check a single plate across all portals
+- POST /api/run-batch                  Check all active plates (placeholder)
+- POST /api/create-checkout-session    Stripe Checkout (Supabase JWT Bearer)
+- POST /api/create-billing-portal-session  Stripe Billing Portal (Supabase JWT Bearer)
+- POST /api/stripe-webhook             Stripe webhooks (signature only; no Bearer)
 """
 from contextlib import asynccontextmanager
 
@@ -16,7 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from .config import settings
-from .routers import health, monitor, onboard
+from .routers import billing, health, monitor, onboard
 
 
 logger = structlog.get_logger()
@@ -55,6 +58,7 @@ app.add_middleware(
     allow_origins=[
         "https://plateguard.io",
         "https://www.plateguard.io",
+        "https://app.plateguard.io",
     ],
     allow_credentials=False,
     allow_methods=["GET", "POST", "OPTIONS"],
@@ -82,5 +86,10 @@ app.include_router(
     onboard.router,
     prefix="/api",
     tags=["onboard"],
+)
+app.include_router(
+    billing.router,
+    prefix="/api",
+    tags=["billing"],
 )
 
