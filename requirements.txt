@@ -9,6 +9,7 @@ pydantic==2.10.0
 email-validator>=2.0.0,<3
 pydantic-settings==2.7.0
 browserbase==1.0.0
+2captcha-python==2.0.5
 structlog==24.4.0
 python-dotenv==1.0.0
 requests==2.31.0

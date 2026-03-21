@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     browserbase_api_key: Optional[str] = ""
     browserbase_project_id: Optional[str] = ""
 
+    # 2Captcha (Cambridge eTIMS image CAPTCHA)
+    twocaptcha_api_key: Optional[str] = ""
+
     # Worker
     worker_api_key: str
     browser_mode: str = "local"  # "local" or "browserbase"

@@ -84,8 +84,8 @@ async def check_plate(request: CheckPlateRequest):
     """
     Check a single plate across specified portals.
     Checks RMC Pay cities (Boston, New Bedford, Lowell, Brookline) and Cambridge (eTIMS)
-    by default when portals are omitted. Cambridge requires Browserbase env vars and
-    profile ``dob_mmdd`` when the plate is tied to a user (batch checks).
+    by default when portals are omitted. Cambridge requires Browserbase, ``TWOCAPTCHA_API_KEY``,
+    and profile ``dob_mmdd`` when the plate is tied to a user (batch checks).
     """
     service = MonitorService()
     result = await service.check_single_plate(

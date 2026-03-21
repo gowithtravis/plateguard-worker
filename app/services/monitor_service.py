@@ -19,6 +19,7 @@ from ..portals.cambridge_etims import (
     CAMBRIDGE_PORTAL_LABEL,
     browserbase_configured,
     search_violations_sync,
+    twocaptcha_configured,
 )
 from ..portals.rmc_parking import (
     RMC_PAY_PORTALS,
@@ -90,6 +91,12 @@ class MonitorService:
                 if not browserbase_configured():
                     logger.warning(
                         "cambridge_skipped_browserbase_not_configured",
+                        plate_number=plate_number,
+                    )
+                    continue
+                if not twocaptcha_configured():
+                    logger.warning(
+                        "cambridge_skipped_twocaptcha_not_configured",
                         plate_number=plate_number,
                     )
                     continue

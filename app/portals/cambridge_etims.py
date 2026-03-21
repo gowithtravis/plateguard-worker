@@ -2,10 +2,11 @@
 Cambridge, MA parking ticket lookup via eTIMS (Browserbase + Playwright).
 
 Plate search with state, passenger type, DOB (MM/DD), and image CAPTCHA.
-CAPTCHA is handled by Browserbase automatic solving when enabled on the session.
+CAPTCHA is solved via 2Captcha using a screenshot of ``#captcha``.
 """
 from __future__ import annotations
 
+import base64
 import re
 from typing import Any, Dict, List
 from urllib.parse import parse_qs, unquote, urljoin, urlparse
@@ -34,6 +35,10 @@ def browserbase_configured() -> bool:
         (settings.browserbase_api_key or "").strip()
         and (settings.browserbase_project_id or "").strip()
     )
+
+
+def twocaptcha_configured() -> bool:
+    return bool((settings.twocaptcha_api_key or "").strip())
 
 
 def parse_dob_mmdd(value: str) -> tuple[str, str]:
@@ -164,40 +169,73 @@ def _security_error_in_html(html: str) -> bool:
 
 
 def _wait_after_load_for_captcha(page: Any) -> None:
-    """Give Browserbase time to attach/solve CAPTCHA before we interact with the form."""
+    """Let the page and CAPTCHA image settle before scraping the image."""
     page.wait_for_timeout(POST_LOAD_CAPTCHA_WAIT_MS)
 
 
-def _fill_plate_form_and_submit(
-    page: Any,
-    plate: str,
-    st: str,
-    mm: str,
-    dd: str,
-    timeout_ms: int,
-) -> None:
+def _fill_plate_fields(page: Any, plate: str, st: str, mm: str, dd: str) -> None:
     page.locator("#ticketNumber").fill("")
     page.locator("#platePrefix").select_option(st)
     page.locator("#plateNumber").fill(plate)
     page.locator("#birthMonth").select_option(mm)
     page.locator("#birthDay").select_option(dd)
 
-    page.wait_for_selector("#captcha", state="visible", timeout=30_000)
-    page.locator("input.captchaDynamic").first.wait_for(state="visible", timeout=30_000)
+
+def _solve_captcha_with_2captcha(
+    page: Any,
+    solver: Any,
+    *,
+    attempt: int,
+    session_id: str,
+) -> str:
+    from twocaptcha import ApiException, NetworkException, TimeoutException, ValidationException
+
+    captcha_img = page.locator("#captcha")
+    captcha_img.wait_for(state="visible", timeout=30_000)
+    png = captcha_img.screenshot(type="png")
+    if not png:
+        raise CambridgeEtimError("CAPTCHA image screenshot was empty")
+
+    b64 = base64.standard_b64encode(png).decode("ascii")
+    logger.info(
+        "cambridge_2captcha_request",
+        attempt=attempt,
+        session_id=session_id,
+        png_bytes=len(png),
+    )
 
     try:
-        page.wait_for_function(
-            """() => {
-                const el = document.querySelector('input.captchaDynamic');
-                return el && el.value && el.value.length >= 3;
-            }""",
-            timeout=90_000,
+        raw = solver.normal(
+            b64,
+            minLen=3,
+            maxLen=8,
         )
-    except Exception:
-        logger.warning(
-            "cambridge_captcha_autofill_timeout",
-            detail="Proceeding to submit; Browserbase may still solve on post",
-        )
+    except (ValidationException, ApiException, NetworkException, TimeoutException) as exc:
+        logger.warning("cambridge_2captcha_api_error", error=str(exc), attempt=attempt)
+        raise CambridgeEtimError(f"2Captcha request failed: {exc}") from exc
+    except Exception as exc:
+        logger.warning("cambridge_2captcha_error", error=str(exc), attempt=attempt)
+        raise CambridgeEtimError(f"2Captcha solve failed: {exc}") from exc
+
+    code = raw.get("code") if isinstance(raw, dict) else raw
+    text = str(code or "").strip()
+    if not text:
+        raise CambridgeEtimError("2Captcha returned an empty solution")
+
+    logger.info(
+        "cambridge_2captcha_solved",
+        attempt=attempt,
+        session_id=session_id,
+        solution_length=len(text),
+    )
+    return text
+
+
+def _fill_captcha_input_and_submit(page: Any, solution: str, timeout_ms: int) -> None:
+    inp = page.locator("input.captchaDynamic").first
+    inp.wait_for(state="visible", timeout=30_000)
+    inp.fill("")
+    inp.fill(solution)
 
     page.locator('input[type="submit"][name="submit"]').click()
     page.wait_for_load_state("domcontentloaded", timeout=timeout_ms)
@@ -218,6 +256,8 @@ def search_violations_sync(
     """
     if not browserbase_configured():
         raise CambridgeEtimError("Browserbase is not configured (API key / project id)")
+    if not twocaptcha_configured():
+        raise CambridgeEtimError("2Captcha is not configured (TWOCAPTCHA_API_KEY)")
 
     plate = re.sub(r"[^A-Z0-9]", "", (plate_number or "").upper())
     st = (state or "MA").strip().upper()
@@ -227,12 +267,12 @@ def search_violations_sync(
 
     from browserbase import Browserbase
     from playwright.sync_api import sync_playwright
+    from twocaptcha import TwoCaptcha
+
+    solver = TwoCaptcha(settings.twocaptcha_api_key.strip(), defaultTimeout=180)
 
     bb = Browserbase(api_key=settings.browserbase_api_key.strip())
-    session = bb.sessions.create(
-        project_id=settings.browserbase_project_id.strip(),
-        browser_settings={"solve_captchas": True},
-    )
+    session = bb.sessions.create(project_id=settings.browserbase_project_id.strip())
     connect_url = session.connect_url
 
     logger.info(
@@ -276,7 +316,14 @@ def search_violations_sync(
                         page.reload(wait_until="domcontentloaded", timeout=timeout_ms)
 
                     _wait_after_load_for_captcha(page)
-                    _fill_plate_form_and_submit(page, plate, st, mm, dd, timeout_ms)
+                    _fill_plate_fields(page, plate, st, mm, dd)
+                    solution = _solve_captcha_with_2captcha(
+                        page,
+                        solver,
+                        attempt=attempt,
+                        session_id=session.id,
+                    )
+                    _fill_captcha_input_and_submit(page, solution, timeout_ms)
                     html = page.content()
 
                     if not _still_on_search_form(page):
