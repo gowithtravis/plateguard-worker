@@ -20,7 +20,13 @@ router = APIRouter()
 class ReportTicketRequest(BaseModel):
     user_id: str = Field(..., description="Supabase auth user id (profiles.id)")
     plate_id: str = Field(..., description="UUID of the plates row")
-    ticket_number: str
+    ticket_number: str = Field(
+        ...,
+        description=(
+            "Parking ticket / notice number, or for portal_type=ezdrivema the Pay By Plate MA "
+            "invoice number (passed to EZDriveMA as invoice_number)"
+        ),
+    )
     city: str = Field(
         "",
         description="Kelley & Ryan municipality name or numeric town id; optional for Somerville CHS",

@@ -58,8 +58,8 @@ def normalize_plate_portals(portals: Optional[list[str]]) -> list[str]:
     - ``boston_parking`` → same full default set (backward compatibility).
     - Otherwise only known labels are kept; if nothing remains, full default set.
 
-    Ticket-number-only portals (``kelley_ryan``, ``somerville_chs``) are supported for
-    manual reporting but are **never** included here — they are rechecked separately.
+    Ticket-/invoice-only portals (``kelley_ryan``, ``somerville_chs``, ``ezdrivema``) are
+    supported for manual reporting but are **never** included here — they are rechecked separately.
     """
     all_rmc = default_rmc_portal_labels()
     default_all = list(all_rmc) + [CAMBRIDGE_PORTAL_LABEL]
@@ -299,6 +299,7 @@ class MonitorService:
                 plate_id=plate_id,
                 source_portal=EZDRIVEMA_PORTAL,
             )
+            violation.violation_type = ViolationType.toll
             violation.status = self._violation_status_from_payload(merged_raw)
             is_new = await self.store.upsert_violation(violation)
             return {
@@ -459,6 +460,7 @@ class MonitorService:
                         plate_id=plate_id,
                         source_portal=portal,
                     )
+                    violation.violation_type = ViolationType.toll
                     violation.status = self._violation_status_from_payload(merged_raw)
                     await self.store.upsert_violation(violation)
                     await self.store.log_check(
