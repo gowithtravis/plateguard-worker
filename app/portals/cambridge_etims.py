@@ -21,6 +21,9 @@ CAMBRIDGE_PORTAL_LABEL = "Cambridge (eTIMS)"
 CAMBRIDGE_INPUT_URL = "https://wmq.etimspayments.com/pbw/include/cambridge/input.jsp"
 ETIMS_ORIGIN = "https://wmq.etimspayments.com"
 
+MAX_SUBMIT_ATTEMPTS = 3
+POST_LOAD_CAPTCHA_WAIT_MS = 5_000
+
 
 class CambridgeEtimError(Exception):
     """Raised when the Cambridge eTIMS flow fails."""
@@ -142,6 +145,65 @@ def _parse_results_html(html: str) -> List[Dict[str, Any]]:
     return tickets
 
 
+def _still_on_search_form(page: Any) -> bool:
+    """True if the plate search form (plate field + CAPTCHA) is still present."""
+    try:
+        return bool(page.locator("#plateNumber").count() and page.locator("#captcha").count())
+    except Exception:
+        return False
+
+
+def _security_error_in_html(html: str) -> bool:
+    return bool(
+        re.search(
+            r"invalid\s+security|invalid\s+captcha|security\s+code\s+you\s+entered",
+            html,
+            re.I,
+        )
+    )
+
+
+def _wait_after_load_for_captcha(page: Any) -> None:
+    """Give Browserbase time to attach/solve CAPTCHA before we interact with the form."""
+    page.wait_for_timeout(POST_LOAD_CAPTCHA_WAIT_MS)
+
+
+def _fill_plate_form_and_submit(
+    page: Any,
+    plate: str,
+    st: str,
+    mm: str,
+    dd: str,
+    timeout_ms: int,
+) -> None:
+    page.locator("#ticketNumber").fill("")
+    page.locator("#platePrefix").select_option(st)
+    page.locator("#plateNumber").fill(plate)
+    page.locator("#birthMonth").select_option(mm)
+    page.locator("#birthDay").select_option(dd)
+
+    page.wait_for_selector("#captcha", state="visible", timeout=30_000)
+    page.locator("input.captchaDynamic").first.wait_for(state="visible", timeout=30_000)
+
+    try:
+        page.wait_for_function(
+            """() => {
+                const el = document.querySelector('input.captchaDynamic');
+                return el && el.value && el.value.length >= 3;
+            }""",
+            timeout=90_000,
+        )
+    except Exception:
+        logger.warning(
+            "cambridge_captcha_autofill_timeout",
+            detail="Proceeding to submit; Browserbase may still solve on post",
+        )
+
+    page.locator('input[type="submit"][name="submit"]').click()
+    page.wait_for_load_state("domcontentloaded", timeout=timeout_ms)
+    page.wait_for_timeout(2000)
+
+
 def search_violations_sync(
     plate_number: str,
     state: str,
@@ -187,44 +249,67 @@ def search_violations_sync(
                 context = browser.contexts[0] if browser.contexts else browser.new_context()
                 page = context.new_page()
                 page.set_default_timeout(timeout_ms)
-                page.goto(CAMBRIDGE_INPUT_URL, wait_until="domcontentloaded", timeout=timeout_ms)
 
-                page.locator("#ticketNumber").fill("")
-                page.locator("#platePrefix").select_option(st)
-                page.locator("#plateNumber").fill(plate)
-                page.locator("#birthMonth").select_option(mm)
-                page.locator("#birthDay").select_option(dd)
-
-                page.wait_for_selector("#captcha", state="visible", timeout=30_000)
-                captcha_input = page.locator("input.captchaDynamic").first
-                captcha_input.wait_for(state="visible", timeout=30_000)
-
-                try:
-                    page.wait_for_function(
-                        """() => {
-                            const el = document.querySelector('input.captchaDynamic');
-                            return el && el.value && el.value.length >= 3;
-                        }""",
-                        timeout=90_000,
-                    )
-                except Exception:
-                    logger.warning(
-                        "cambridge_captcha_autofill_timeout",
-                        detail="Proceeding to submit; Browserbase may still solve on post",
+                for attempt in range(1, MAX_SUBMIT_ATTEMPTS + 1):
+                    logger.info(
+                        "cambridge_etims_attempt_start",
+                        attempt=attempt,
+                        max_attempts=MAX_SUBMIT_ATTEMPTS,
+                        session_id=session.id,
+                        plate=plate,
+                        state=st,
                     )
 
-                page.locator('input[type="submit"][name="submit"]').click()
-                page.wait_for_load_state("domcontentloaded", timeout=timeout_ms)
-                page.wait_for_timeout(2000)
-                html = page.content()
-
-                if page.locator("#plateNumber").count() and page.locator("#captcha").count():
-                    if re.search(r"invalid|incorrect|error", html, re.I):
-                        raise CambridgeEtimError(
-                            "Still on search form after submit — check CAPTCHA or form validation"
+                    if attempt == 1:
+                        page.goto(
+                            CAMBRIDGE_INPUT_URL,
+                            wait_until="domcontentloaded",
+                            timeout=timeout_ms,
                         )
+                    else:
+                        logger.info(
+                            "cambridge_etims_attempt_refresh",
+                            attempt=attempt,
+                            session_id=session.id,
+                            reason="search_form_still_visible_after_submit",
+                        )
+                        page.reload(wait_until="domcontentloaded", timeout=timeout_ms)
 
-                return _parse_results_html(html)
+                    _wait_after_load_for_captcha(page)
+                    _fill_plate_form_and_submit(page, plate, st, mm, dd, timeout_ms)
+                    html = page.content()
+
+                    if not _still_on_search_form(page):
+                        logger.info(
+                            "cambridge_etims_attempt_done",
+                            attempt=attempt,
+                            session_id=session.id,
+                            outcome="left_search_form",
+                            plate=plate,
+                        )
+                        return _parse_results_html(html)
+
+                    logger.warning(
+                        "cambridge_etims_attempt_still_on_search_form",
+                        attempt=attempt,
+                        max_attempts=MAX_SUBMIT_ATTEMPTS,
+                        session_id=session.id,
+                        plate=plate,
+                        will_retry=attempt < MAX_SUBMIT_ATTEMPTS,
+                    )
+
+                    if attempt < MAX_SUBMIT_ATTEMPTS:
+                        continue
+
+                    if _security_error_in_html(html):
+                        raise CambridgeEtimError(
+                            "Security check failed after "
+                            f"{MAX_SUBMIT_ATTEMPTS} attempts (invalid CAPTCHA or session)."
+                        )
+                    raise CambridgeEtimError(
+                        f"Still on Cambridge eTIMS search form after {MAX_SUBMIT_ATTEMPTS} attempts "
+                        "(CAPTCHA or form validation)."
+                    )
             finally:
                 browser.close()
     finally:
