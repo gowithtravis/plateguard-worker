@@ -31,6 +31,30 @@ RMC_PAY_PORTALS: Dict[str, Dict[str, str]] = {
         "host": "brookline.rmcpay.com",
         "operator_id": "brookline",
     },
+    "Chelsea (RMC Pay)": {
+        "host": "chelseama.rmcpay.com",
+        "operator_id": "chelseama",
+    },
+    "Salem (RMC Pay)": {
+        "host": "salemma.rmcpay.com",
+        "operator_id": "salemma",
+    },
+    "Quincy (RMC Pay)": {
+        "host": "quincyma.rmcpay.com",
+        "operator_id": "quincyma",
+    },
+    "Salisbury (RMC Pay)": {
+        "host": "salisburyma.rmcpay.com",
+        "operator_id": "salisburyma",
+    },
+    "Northampton (RMC Pay)": {
+        "host": "northampton.rmcpay.com",
+        "operator_id": "northampton",
+    },
+    "Plymouth County (RMC Pay)": {
+        "host": "plymouthma.rmcpay.com",
+        "operator_id": "plymouthma",
+    },
 }
 
 

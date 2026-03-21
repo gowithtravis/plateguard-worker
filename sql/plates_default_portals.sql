@@ -6,5 +6,11 @@ ALTER TABLE plates
     'Boston (RMC Pay)',
     'New Bedford (RMC Pay)',
     'Lowell (RMC Pay)',
-    'Brookline (RMC Pay)'
+    'Brookline (RMC Pay)',
+    'Chelsea (RMC Pay)',
+    'Salem (RMC Pay)',
+    'Quincy (RMC Pay)',
+    'Salisbury (RMC Pay)',
+    'Northampton (RMC Pay)',
+    'Plymouth County (RMC Pay)'
   ]::text[];
