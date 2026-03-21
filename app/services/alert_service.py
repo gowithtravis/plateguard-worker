@@ -24,10 +24,31 @@ except Exception:  # pragma: no cover
 
 logger = structlog.get_logger()
 
-# PlateGuard brand
+# PlateGuard brand (aligned with consumer dashboard)
 COLOR_ORANGE = "#FF9A00"
 COLOR_NAVY = "#1E2D4D"
 COLOR_BG = "#FAFAF8"
+COLOR_TEXT = "#1A1A1A"
+COLOR_MUTED = "#5C5C5C"
+COLOR_CARD_BORDER = "#C8C7C1"
+
+APP_ORIGIN = "https://app.plateguard.io"
+
+# Inter + fallbacks (Google Fonts link in <head> for clients that support it)
+FONT_STACK = (
+    "'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, "
+    "Helvetica, Arial, sans-serif"
+)
+
+# Inline PlateGuard shield (orange) — matches dashboard mark
+LOGO_SVG = """
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 48" width="36" height="44" style="display:block;" aria-hidden="true">
+  <path d="M20 2L4 9v14c0 9.4 6.8 18.2 16 20.4C29.2 41.2 36 32.4 36 23V9L20 2z" fill="#FF9A00"/>
+  <rect x="10" y="17" width="20" height="13" rx="2" fill="#1E2D4D"/>
+  <rect x="13" y="20" width="14" height="2.5" rx="1" fill="#FFFFFF" opacity="0.9"/>
+  <rect x="14" y="24.5" width="12" height="2" rx="1" fill="#FFFFFF" opacity="0.6"/>
+</svg>
+""".strip()
 
 
 class AlertService:
@@ -39,6 +60,94 @@ class AlertService:
                 settings.supabase_url,
                 settings.supabase_service_key,  # type: ignore[arg-type]
             )
+
+    def _branded_cta_button(self, href: str, label: str) -> str:
+        """Primary CTA: orange fill, dark text, rounded (table-based for email clients)."""
+        safe_href = html_module.escape(href, quote=True)
+        safe_label = html_module.escape(label)
+        return f"""
+<table role="presentation" cellspacing="0" cellpadding="0" style="margin:24px 0 0;">
+  <tr>
+    <td style="border-radius:10px;background-color:{COLOR_ORANGE};">
+      <a href="{safe_href}" target="_blank" rel="noopener noreferrer"
+         style="display:inline-block;padding:14px 28px;font-family:{FONT_STACK};font-size:14px;font-weight:600;line-height:1.25;color:{COLOR_TEXT};text-decoration:none;border-radius:10px;">
+        {safe_label}
+      </a>
+    </td>
+  </tr>
+</table>
+""".strip()
+
+    def _branded_email_footer(self) -> str:
+        safe_unsub = html_module.escape(f"{APP_ORIGIN}/settings", quote=True)
+        return f"""
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin-top:28px;">
+  <tr>
+    <td style="padding:0 8px;text-align:center;font-family:{FONT_STACK};font-size:12px;line-height:1.6;color:{COLOR_MUTED};">
+      <p style="margin:0 0 8px;">PlateGuard — Credit monitoring for your license plate</p>
+      <p style="margin:0;">
+        <a href="{safe_unsub}" style="color:{COLOR_MUTED};text-decoration:underline;">Manage email preferences</a>
+        <span style="color:{COLOR_MUTED};"> · </span>
+        <a href="#" style="color:{COLOR_MUTED};text-decoration:underline;">Unsubscribe</a>
+      </p>
+    </td>
+  </tr>
+</table>
+""".strip()
+
+    def _branded_email_header_row(self) -> str:
+        """Navy bar with shield SVG + PlateGuard wordmark."""
+        return f"""
+<tr>
+  <td style="background-color:{COLOR_NAVY};padding:20px 24px;">
+    <table role="presentation" cellspacing="0" cellpadding="0">
+      <tr>
+        <td style="vertical-align:middle;padding-right:12px;">{LOGO_SVG}</td>
+        <td style="vertical-align:middle;">
+          <span style="font-family:{FONT_STACK};font-size:20px;font-weight:600;color:#FFFFFF;letter-spacing:-0.02em;">
+            PlateGuard
+          </span>
+        </td>
+      </tr>
+    </table>
+  </td>
+</tr>
+""".strip()
+
+    def _build_branded_email_html(self, *, page_title: str, white_inner_html: str) -> str:
+        """Full document: #FAFAF8 outer, white card, shared header + footer."""
+        safe_title = html_module.escape(page_title)
+        return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="x-ua-compatible" content="ie=edge" />
+  <title>{safe_title}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+</head>
+<body style="margin:0;padding:0;background-color:{COLOR_BG};font-family:{FONT_STACK};">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background-color:{COLOR_BG};padding:32px 16px;">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="100%" cellspacing="0" cellpadding="0"
+               style="max-width:560px;background-color:#FFFFFF;border-radius:16px;overflow:hidden;
+                      box-shadow:0 1px 4px rgba(0,0,0,0.08);border:1px solid rgba(200,199,193,0.4);">
+          {self._branded_email_header_row()}
+          <tr>
+            <td style="padding:28px 24px 32px;font-family:{FONT_STACK};font-size:15px;line-height:1.55;color:{COLOR_TEXT};">
+              {white_inner_html}
+              {self._branded_email_footer()}
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>"""
 
     def _lookup_user_email_sync(self, violation: Violation) -> Optional[str]:
         """Resolve profile email for a violation's plate (sync; run in thread)."""
@@ -183,64 +292,49 @@ class AlertService:
     def _build_new_violation_html(self, violation: Violation) -> str:
         f = self._violation_display_fields(violation)
         safe = {k: html_module.escape(v) for k, v in f.items()}
+        violations_url = f"{APP_ORIGIN}/violations"
 
-        return f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>New violation — PlateGuard</title>
-</head>
-<body style="margin:0;padding:0;background-color:{COLOR_BG};font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
-  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background-color:{COLOR_BG};padding:24px 16px;">
-    <tr>
-      <td align="center">
-        <table role="presentation" width="100%" style="max-width:560px;background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 2px 8px rgba(30,45,77,0.08);">
-          <tr>
-            <td style="background-color:{COLOR_NAVY};padding:20px 24px;">
-              <p style="margin:0;font-size:11px;letter-spacing:0.12em;text-transform:uppercase;color:{COLOR_ORANGE};font-weight:600;">PlateGuard</p>
-              <h1 style="margin:8px 0 0;font-size:22px;line-height:1.25;color:#ffffff;font-weight:700;">New violation detected</h1>
-            </td>
-          </tr>
-          <tr>
-            <td style="padding:24px;color:{COLOR_NAVY};font-size:15px;line-height:1.5;">
-              <p style="margin:0 0 16px;">We found a <strong>new</strong> open violation for plate <strong style="color:{COLOR_ORANGE};">{safe["plate"]}</strong> via {safe["portal"]}.</p>
-              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border:1px solid #e8e6e0;border-radius:8px;overflow:hidden;">
-                <tr style="background:{COLOR_BG};">
-                  <td style="padding:12px 16px;font-weight:600;color:{COLOR_NAVY};width:38%;">Ticket #</td>
-                  <td style="padding:12px 16px;color:{COLOR_NAVY};">{safe["ticket_number"]}</td>
-                </tr>
-                <tr>
-                  <td style="padding:12px 16px;font-weight:600;color:{COLOR_NAVY};border-top:1px solid #e8e6e0;">Amount due</td>
-                  <td style="padding:12px 16px;color:{COLOR_NAVY};border-top:1px solid #e8e6e0;">{safe["amount_due"]}</td>
-                </tr>
-                <tr style="background:{COLOR_BG};">
-                  <td style="padding:12px 16px;font-weight:600;color:{COLOR_NAVY};border-top:1px solid #e8e6e0;">Description</td>
-                  <td style="padding:12px 16px;color:{COLOR_NAVY};border-top:1px solid #e8e6e0;">{safe["description"]}</td>
-                </tr>
-                <tr>
-                  <td style="padding:12px 16px;font-weight:600;color:{COLOR_NAVY};border-top:1px solid #e8e6e0;">Location</td>
-                  <td style="padding:12px 16px;color:{COLOR_NAVY};border-top:1px solid #e8e6e0;">{safe["location"]}</td>
-                </tr>
-                <tr style="background:{COLOR_BG};">
-                  <td style="padding:12px 16px;font-weight:600;color:{COLOR_NAVY};border-top:1px solid #e8e6e0;">Issue date</td>
-                  <td style="padding:12px 16px;color:{COLOR_NAVY};border-top:1px solid #e8e6e0;">{safe["issue_date"]}</td>
-                </tr>
-              </table>
-              <p style="margin:20px 0 0;font-size:13px;color:#5c6b7f;">Log in to PlateGuard to review and take action before late fees apply.</p>
-            </td>
-          </tr>
-          <tr>
-            <td style="padding:16px 24px 24px;text-align:center;">
-              <p style="margin:0;font-size:12px;color:#8a94a6;">Sent by PlateGuard · <span style="color:{COLOR_ORANGE};">Stay ahead of tickets &amp; tolls</span></p>
-            </td>
-          </tr>
-        </table>
-      </td>
-    </tr>
-  </table>
-</body>
-</html>"""
+        inner = f"""
+<h1 style="margin:0 0 12px;font-size:22px;font-weight:600;line-height:1.3;color:{COLOR_NAVY};font-family:{FONT_STACK};">
+  New violation detected
+</h1>
+<p style="margin:0 0 20px;color:{COLOR_TEXT};font-family:{FONT_STACK};">
+  We found a <strong>new</strong> open violation for plate
+  <strong style="color:{COLOR_ORANGE};">{safe["plate"]}</strong> via {safe["portal"]}.
+</p>
+<table role="presentation" width="100%" cellspacing="0" cellpadding="0"
+       style="border:1px solid {COLOR_CARD_BORDER};border-radius:12px;overflow:hidden;">
+  <tr style="background-color:{COLOR_BG};">
+    <td style="padding:12px 16px;font-weight:600;color:{COLOR_NAVY};width:38%;font-family:{FONT_STACK};font-size:14px;">Ticket #</td>
+    <td style="padding:12px 16px;color:{COLOR_TEXT};font-family:{FONT_STACK};font-size:14px;">{safe["ticket_number"]}</td>
+  </tr>
+  <tr>
+    <td style="padding:12px 16px;font-weight:600;color:{COLOR_NAVY};border-top:1px solid {COLOR_CARD_BORDER};font-family:{FONT_STACK};font-size:14px;">Amount due</td>
+    <td style="padding:12px 16px;color:{COLOR_TEXT};border-top:1px solid {COLOR_CARD_BORDER};font-family:{FONT_STACK};font-size:14px;">{safe["amount_due"]}</td>
+  </tr>
+  <tr style="background-color:{COLOR_BG};">
+    <td style="padding:12px 16px;font-weight:600;color:{COLOR_NAVY};border-top:1px solid {COLOR_CARD_BORDER};font-family:{FONT_STACK};font-size:14px;">Description</td>
+    <td style="padding:12px 16px;color:{COLOR_TEXT};border-top:1px solid {COLOR_CARD_BORDER};font-family:{FONT_STACK};font-size:14px;">{safe["description"]}</td>
+  </tr>
+  <tr>
+    <td style="padding:12px 16px;font-weight:600;color:{COLOR_NAVY};border-top:1px solid {COLOR_CARD_BORDER};font-family:{FONT_STACK};font-size:14px;">Location</td>
+    <td style="padding:12px 16px;color:{COLOR_TEXT};border-top:1px solid {COLOR_CARD_BORDER};font-family:{FONT_STACK};font-size:14px;">{safe["location"]}</td>
+  </tr>
+  <tr style="background-color:{COLOR_BG};">
+    <td style="padding:12px 16px;font-weight:600;color:{COLOR_NAVY};border-top:1px solid {COLOR_CARD_BORDER};font-family:{FONT_STACK};font-size:14px;">Issue date</td>
+    <td style="padding:12px 16px;color:{COLOR_TEXT};border-top:1px solid {COLOR_CARD_BORDER};font-family:{FONT_STACK};font-size:14px;">{safe["issue_date"]}</td>
+  </tr>
+</table>
+<p style="margin:20px 0 0;font-size:14px;color:{COLOR_MUTED};font-family:{FONT_STACK};">
+  Log in to review details and take action before late fees apply.
+</p>
+{self._branded_cta_button(violations_url, "View in Dashboard")}
+""".strip()
+
+        return self._build_branded_email_html(
+            page_title="New violation — PlateGuard",
+            white_inner_html=inner,
+        )
 
     async def send_sample_alert_email(self, to_email: str) -> bool:
         """
@@ -276,64 +370,55 @@ class AlertService:
         full_name: str,
         plate_number: Optional[str],
     ) -> str:
-        """Branded HTML for GHL waitlist / onboard confirmation (Resend)."""
+        """Branded HTML for waitlist / onboard welcome (Resend)."""
         fn_clean = (first_name or "").strip()
         safe_fn = html_module.escape(fn_clean or "there")
         full_clean = (full_name or "").strip()
         safe_full = html_module.escape(full_clean or fn_clean or "there")
-        thanks = "Thanks for joining the PlateGuard waitlist."
+
+        thanks = "Thank you for joining the PlateGuard waitlist."
         if full_clean and full_clean.lower() != fn_clean.lower():
             thanks += f" We have you down as <strong>{safe_full}</strong>."
+
         if plate_number and str(plate_number).strip():
             safe_plate = html_module.escape(str(plate_number).strip().upper())
             plate_block = (
-                f'<p style="margin:0 0 16px;color:{COLOR_NAVY};">'
-                f"We&apos;ll monitor plate <strong style=\"color:{COLOR_ORANGE};\">{safe_plate}</strong> "
-                f"(MA) for you when PlateGuard goes live.</p>"
+                f'<p style="margin:0 0 18px;color:{COLOR_TEXT};font-family:{FONT_STACK};">'
+                f"When you&apos;re in, we can monitor plate "
+                f"<strong style=\"color:{COLOR_ORANGE};\">{safe_plate}</strong> "
+                f"(MA) for new violations.</p>"
             )
         else:
             plate_block = (
-                f'<p style="margin:0 0 16px;color:{COLOR_NAVY};">'
-                "You can add a license plate from your account anytime after launch.</p>"
+                f'<p style="margin:0 0 18px;color:{COLOR_TEXT};font-family:{FONT_STACK};">'
+                "Once you&apos;re in, you can add license plates from your dashboard anytime.</p>"
             )
 
-        return f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>You&apos;re on the PlateGuard waitlist</title>
-</head>
-<body style="margin:0;padding:0;background-color:{COLOR_BG};font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
-  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background-color:{COLOR_BG};padding:24px 16px;">
-    <tr>
-      <td align="center">
-        <table role="presentation" width="100%" style="max-width:560px;background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 2px 8px rgba(30,45,77,0.08);">
-          <tr>
-            <td style="background-color:{COLOR_NAVY};padding:20px 24px;">
-              <p style="margin:0;font-size:11px;letter-spacing:0.12em;text-transform:uppercase;color:{COLOR_ORANGE};font-weight:600;">PlateGuard</p>
-              <h1 style="margin:8px 0 0;font-size:22px;line-height:1.25;color:#ffffff;font-weight:700;">You&apos;re on the list</h1>
-            </td>
-          </tr>
-          <tr>
-            <td style="padding:24px;color:{COLOR_NAVY};font-size:15px;line-height:1.55;">
-              <p style="margin:0 0 16px;">Hi {safe_fn},</p>
-              <p style="margin:0 0 16px;">{thanks} We&apos;ll email you when your spot opens and monitoring is ready.</p>
-              {plate_block}
-              <p style="margin:0;font-size:13px;color:#5c6b7f;">Questions? Just reply to this email.</p>
-            </td>
-          </tr>
-          <tr>
-            <td style="padding:16px 24px 24px;text-align:center;">
-              <p style="margin:0;font-size:12px;color:#8a94a6;">PlateGuard · <span style="color:{COLOR_ORANGE};">Tickets &amp; tolls, before late fees</span></p>
-            </td>
-          </tr>
-        </table>
-      </td>
-    </tr>
-  </table>
-</body>
-</html>"""
+        inner = f"""
+<h1 style="margin:0 0 16px;font-size:22px;font-weight:600;line-height:1.3;color:{COLOR_NAVY};font-family:{FONT_STACK};">
+  Welcome to PlateGuard
+</h1>
+<p style="margin:0 0 16px;color:{COLOR_TEXT};font-family:{FONT_STACK};">Hi {safe_fn},</p>
+<p style="margin:0 0 16px;color:{COLOR_TEXT};font-family:{FONT_STACK};">{thanks}</p>
+<p style="margin:0 0 18px;color:{COLOR_TEXT};font-family:{FONT_STACK};">
+  <strong>What we do:</strong> PlateGuard monitors official government and toll portals on your behalf
+  so parking tickets, tolls, speed-camera, and red-light violations show up in one place—often before
+  late fees stack up.
+</p>
+{plate_block}
+<p style="margin:0 0 8px;font-size:14px;color:{COLOR_MUTED};font-family:{FONT_STACK};">
+  Open the app to explore your dashboard and notification settings.
+</p>
+<p style="margin:0;font-size:14px;color:{COLOR_MUTED};font-family:{FONT_STACK};">
+  Questions? Reply to this email—we read every message.
+</p>
+{self._branded_cta_button(APP_ORIGIN, "Open PlateGuard")}
+""".strip()
+
+        return self._build_branded_email_html(
+            page_title="Welcome to PlateGuard",
+            white_inner_html=inner,
+        )
 
     async def send_waitlist_welcome_email(
         self,
@@ -352,7 +437,7 @@ class AlertService:
         fn = (first_name or "").strip()
         ln = (last_name or "").strip()
         full_name = f"{fn} {ln}".strip()
-        subject = "You're on the PlateGuard waitlist"
+        subject = "Welcome to PlateGuard"
         html_body = self._build_waitlist_welcome_html(fn, full_name, plate_number)
         return await self.send_email(to_email.strip().lower(), subject, html_body)
 
