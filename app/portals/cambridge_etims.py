@@ -73,7 +73,11 @@ def _parse_results_html(html: str) -> List[Dict[str, Any]]:
 
     if re.search(
         r"no\s+matching|could\s+not\s+find|did\s+not\s+match|unable\s+to\s+locate|"
-        r"no\s+open\s+citations|no\s+citations\s+found|no\s+records\s+found",
+        r"no\s+open\s+citations|no\s+citations\s+found|no\s+records\s+found|"
+        r"no\s+violations?\s+found|no\s+unpaid\s+parking|no\s+parking\s+violations?\s+found|"
+        r"you\s+have\s+no\s+(open\s+)?(citations|violations|tickets)|"
+        r"do\s+not\s+have\s+any\s+(open\s+)?(citations|violations|tickets)|"
+        r"no\s+records\s+to\s+display|no\s+outstanding\s+(citations|tickets|violations)",
         lower,
     ):
         return []
@@ -151,12 +155,34 @@ def _parse_results_html(html: str) -> List[Dict[str, Any]]:
     return tickets
 
 
-def _still_on_search_form(page: Any) -> bool:
-    """True if the plate search form (plate field + CAPTCHA) is still present."""
-    try:
-        return bool(page.locator("#plateNumber").count() and page.locator("#captcha").count())
-    except Exception:
-        return False
+def _url_is_cambridge_plate_search_jsp(url: str) -> bool:
+    """True when the browser is still on the plate/ticket entry page (search not posted)."""
+    return "include/cambridge/input.jsp" in (url or "")
+
+
+def _submit_reached_results_flow(url: str) -> bool:
+    """
+    True after the form POST navigates away from the plate search JSP (e.g. ``inputAction.doh``).
+
+    We only treat **still on** ``include/cambridge/input.jsp`` as "submit did not navigate"
+    (CAPTCHA/validation failure). Do not use ``#plateNumber`` / ``#captcha`` — those can exist
+    on both search and result templates.
+    """
+    return bool(url) and not _url_is_cambridge_plate_search_jsp(url)
+
+
+def _log_inputaction_html_snippet(url: str, html: str) -> None:
+    """Debug: first 2000 chars of HTML on ``inputAction.doh`` responses."""
+    if "inputaction.doh" not in (url or "").lower():
+        return
+    prefix = html[:2000] if html else ""
+    logger.info(
+        "cambridge_inputaction_html_snippet",
+        url=url,
+        html_prefix=prefix,
+        html_prefix_len=len(prefix),
+        total_html_len=len(html or ""),
+    )
 
 
 def _security_error_in_html(html: str) -> bool:
@@ -478,7 +504,7 @@ def search_violations_sync(
                             "cambridge_etims_attempt_refresh",
                             attempt=attempt,
                             session_id=session.id,
-                            reason="search_form_still_visible_after_submit",
+                            reason="still_on_plate_search_jsp_after_submit",
                         )
                         page.reload(wait_until="domcontentloaded", timeout=timeout_ms)
 
@@ -498,23 +524,28 @@ def search_violations_sync(
                         session_id=session.id,
                     )
                     html = page.content()
+                    url_after = page.url
 
-                    if not _still_on_search_form(page):
+                    _log_inputaction_html_snippet(url_after, html)
+
+                    if _submit_reached_results_flow(url_after):
                         logger.info(
                             "cambridge_etims_attempt_done",
                             attempt=attempt,
                             session_id=session.id,
-                            outcome="left_search_form",
+                            outcome="navigated_past_search_jsp",
+                            url=url_after,
                             plate=plate,
                         )
                         return _parse_results_html(html)
 
                     logger.warning(
-                        "cambridge_etims_attempt_still_on_search_form",
+                        "cambridge_etims_attempt_still_on_input_jsp",
                         attempt=attempt,
                         max_attempts=MAX_SUBMIT_ATTEMPTS,
                         session_id=session.id,
                         plate=plate,
+                        url=url_after,
                         will_retry=attempt < MAX_SUBMIT_ATTEMPTS,
                     )
 
@@ -527,8 +558,8 @@ def search_violations_sync(
                             f"{MAX_SUBMIT_ATTEMPTS} attempts (invalid CAPTCHA or session)."
                         )
                     raise CambridgeEtimError(
-                        f"Still on Cambridge eTIMS search form after {MAX_SUBMIT_ATTEMPTS} attempts "
-                        "(CAPTCHA or form validation)."
+                        f"Still on Cambridge plate search page (input.jsp) after {MAX_SUBMIT_ATTEMPTS} attempts "
+                        f"(CAPTCHA or form validation). Last URL: {url_after!r}"
                     )
             finally:
                 browser.close()
