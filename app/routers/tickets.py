@@ -25,7 +25,7 @@ class ReportTicketRequest(BaseModel):
         "",
         description="Kelley & Ryan municipality name or numeric town id; optional for Somerville CHS",
     )
-    portal_type: Literal["kelley_ryan", "somerville_chs"]
+    portal_type: Literal["kelley_ryan", "somerville_chs", "ezdrivema"]
 
 
 class ReportTicketResponse(BaseModel):
@@ -47,7 +47,7 @@ async def report_ticket(
     auth_user_id: str = Depends(verify_supabase_jwt),
 ) -> ReportTicketResponse:
     """
-    Look up a ticket on Kelley & Ryan or Somerville (City Hall Systems) and save the violation.
+    Look up a ticket on Kelley & Ryan, Somerville (City Hall Systems), or EZDriveMA Pay By Plate MA.
 
     Requires a valid Supabase access token; ``user_id`` must match the authenticated user.
     """

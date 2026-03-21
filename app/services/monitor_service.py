@@ -21,6 +21,11 @@ from ..portals.cambridge_etims import (
     search_violations_sync,
     twocaptcha_configured,
 )
+from ..portals.ezdrivema_tolls import (
+    EZDRIVEMA_PORTAL,
+    EzDriveMaError,
+    invoice_lookup_for_manual_report,
+)
 from ..portals.kelley_ryan import (
     KELLEY_RYAN_PORTAL,
     search_parking_ticket as kelley_ryan_search_ticket,
@@ -244,12 +249,13 @@ class MonitorService:
         portal_type: str,
     ) -> dict:
         """
-        Validate a ticket against Kelley & Ryan or Somerville CHS and persist a violation.
+        Validate a ticket against Kelley & Ryan, Somerville CHS, or EZDriveMA and persist a violation.
 
         ``city`` is required for ``kelley_ryan`` (municipality name or numeric town id).
         For ``somerville_chs``, ``city`` is optional but should reference Somerville.
+        For ``ezdrivema``, ``ticket_number`` is the Pay By Plate MA invoice number.
         """
-        if portal_type not in (KELLEY_RYAN_PORTAL, SOMERVILLE_CHS_PORTAL):
+        if portal_type not in (KELLEY_RYAN_PORTAL, SOMERVILLE_CHS_PORTAL, EZDRIVEMA_PORTAL):
             raise ValueError(f"Unsupported portal_type: {portal_type!r}")
 
         if not self.store.verify_plate_belongs_to_user_sync(plate_id, user_id):
@@ -261,6 +267,47 @@ class MonitorService:
 
         plate_number = str(plate_row["plate_number"])
         state = str(plate_row.get("state") or "MA")
+
+        if portal_type == EZDRIVEMA_PORTAL:
+            try:
+                found, details, excerpt = await asyncio.to_thread(
+                    invoice_lookup_for_manual_report,
+                    ticket_number,
+                    plate_number,
+                    state,
+                )
+            except EzDriveMaError as exc:
+                return {"ok": False, "error": str(exc)}
+            except ValueError as exc:
+                return {"ok": False, "error": str(exc)}
+            if not found or not details:
+                return {"ok": False, "error": "Invoice not found on EZDriveMA Pay By Plate MA portal"}
+
+            merged_raw: dict = {
+                **details,
+                "manual_submission": True,
+                "portal_type": portal_type,
+                "city": "",
+            }
+            if excerpt:
+                merged_raw["result_html_excerpt"] = excerpt
+
+            violation = self._from_rmc_ticket(
+                merged_raw,
+                plate_number,
+                state,
+                plate_id=plate_id,
+                source_portal=EZDRIVEMA_PORTAL,
+            )
+            violation.status = self._violation_status_from_payload(merged_raw)
+            is_new = await self.store.upsert_violation(violation)
+            return {
+                "ok": True,
+                "new_violation": is_new,
+                "ticket_number": ticket_number,
+                "source_portal": EZDRIVEMA_PORTAL,
+                **self._violation_summary_dict(violation),
+            }
 
         if portal_type == KELLEY_RYAN_PORTAL:
             result = await asyncio.to_thread(
@@ -374,6 +421,57 @@ class MonitorService:
                         plate,
                         ticket,
                     )
+                elif portal == EZDRIVEMA_PORTAL:
+                    try:
+                        found_ez, det_ez, ex_ez = await asyncio.to_thread(
+                            invoice_lookup_for_manual_report,
+                            ticket,
+                            plate,
+                            state,
+                        )
+                    except Exception as exc:
+                        logger.error(
+                            "ezdrivema_recheck_failed", ticket=ticket, error=str(exc)
+                        )
+                        errors.append(f"ezdrivema invoice {ticket}: {exc}")
+                        await self.store.log_check(
+                            plate_number=plate,
+                            state=state,
+                            portal=portal,
+                            status="error",
+                            error_message=str(exc),
+                            plate_id=plate_id,
+                        )
+                        continue
+                    if not found_ez or not det_ez:
+                        errors.append(
+                            f"ezdrivema invoice {ticket}: not found on portal during recheck"
+                        )
+                        continue
+                    checked += 1
+                    merged_raw = {**prev_raw, **det_ez, "manual_submission": True}
+                    if ex_ez:
+                        merged_raw["result_html_excerpt"] = ex_ez
+                    violation = self._from_rmc_ticket(
+                        merged_raw,
+                        plate,
+                        state,
+                        plate_id=plate_id,
+                        source_portal=portal,
+                    )
+                    violation.status = self._violation_status_from_payload(merged_raw)
+                    await self.store.upsert_violation(violation)
+                    await self.store.log_check(
+                        plate_number=plate,
+                        state=state,
+                        portal=portal,
+                        status="success",
+                        violations_found=1,
+                        new_violations=0,
+                        plate_id=plate_id,
+                    )
+                    await asyncio.sleep(settings.request_delay_seconds)
+                    continue
                 else:
                     continue
 

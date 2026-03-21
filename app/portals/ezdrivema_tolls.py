@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -11,6 +12,9 @@ from bs4 import BeautifulSoup
 logger = logging.getLogger(__name__)
 
 LOGIN_URL = "https://www.ezdrivema.com/paybyplatemalogin"
+
+# Stored on violations.source_portal for manual reports / rechecks
+EZDRIVEMA_PORTAL = "ezdrivema"
 
 
 class EzDriveMaError(Exception):
@@ -76,6 +80,145 @@ def _build_login_payload(
         }
     )
     return payload
+
+
+def _state_abbr_to_dropdown_value(login_html: str) -> Dict[str, str]:
+    """Map two-letter state codes to ``ddlLicensePlateState`` option values from the login page."""
+    soup = BeautifulSoup(login_html, "html.parser")
+    mapping: Dict[str, str] = {}
+    for sel in soup.find_all("select"):
+        name = sel.get("name") or ""
+        if "ddlLicensePlateState" not in name:
+            continue
+        for opt in sel.find_all("option"):
+            val = (opt.get("value") or "").strip()
+            if not val or val == "0":
+                continue
+            text = re.sub(r"\s+", " ", (opt.get_text() or "").strip().replace("\xa0", " "))
+            m = re.search(r"\(([A-Z]{2})\)\s*$", text)
+            if m:
+                mapping[m.group(1)] = val
+            m2 = re.match(r"^([A-Z]{2})\s*[-–]", text)
+            if m2:
+                mapping[m2.group(1)] = val
+            if re.search(r"massachusetts", text, re.I):
+                mapping.setdefault("MA", val)
+    return mapping
+
+
+_FAILURE_MARKERS = (
+    "invalid invoice",
+    "invalid login",
+    "could not be found",
+    "could not locate",
+    "no invoices match",
+    "we were unable to locate",
+    "unable to verify",
+    "no matching",
+    "please check your invoice",
+    "login failed",
+)
+
+_SUCCESS_MARKERS = (
+    "amount due",
+    "balance due",
+    "total due",
+    "unpaid toll",
+    "invoice balance",
+    "open invoice",
+    "payment due",
+    "make a payment",
+    "account summary",
+)
+
+
+def _response_indicates_invoice_found(html: str) -> bool:
+    low = html.lower()
+    if any(x in low for x in _FAILURE_MARKERS):
+        return False
+    if any(x in low for x in _SUCCESS_MARKERS):
+        return True
+    if re.search(r"\$\s*[\d,]+\.\d{2}", html):
+        return True
+    if "txtinvoicenumber" in low and "lbpbplogin" in low:
+        return False
+    return True
+
+
+def _parse_amounts_from_html(html: str) -> Optional[float]:
+    found = re.findall(r"\$\s*([\d,]+\.\d{2})", html)
+    if not found:
+        return None
+    nums = [float(x.replace(",", "")) for x in found]
+    return max(nums)
+
+
+def _details_from_ezdrive_html(
+    html: str,
+    *,
+    invoice_number: str,
+    plate: str,
+    state_abbr: str,
+) -> Dict[str, Any]:
+    amt = _parse_amounts_from_html(html)
+    return {
+        "violation_number": invoice_number,
+        "violation_id": invoice_number,
+        "ticket_number": invoice_number,
+        "invoice_number": invoice_number,
+        "amount_due": amt,
+        "violation_description": "EZDriveMA Pay By Plate MA (toll)",
+        "source": "EZDriveMA",
+    }
+
+
+def invoice_lookup_for_manual_report(
+    invoice_number: str,
+    plate: str,
+    state_abbr: str,
+    *,
+    timeout: float = 30.0,
+) -> Tuple[bool, Dict[str, Any], Optional[str]]:
+    """
+    Validate invoice + plate on Pay By Plate MA and return structured fields for storage.
+
+    Returns ``(found, details_dict, html_excerpt)``. ``details_dict`` is empty when not found.
+    """
+    inv = (invoice_number or "").strip()
+    pl = re.sub(r"[^A-Za-z0-9]", "", (plate or "").upper())
+    st = (state_abbr or "").strip().upper()
+    if not inv or not pl or not st:
+        raise ValueError("invoice_number, plate, and state are required")
+
+    sess = requests.Session()
+    login_html, hidden = _initial_get(sess, timeout=timeout)
+    mapping = _state_abbr_to_dropdown_value(login_html)
+    state_code = mapping.get(st)
+    if not state_code:
+        if st.isdigit():
+            state_code = st
+        else:
+            raise EzDriveMaError(
+                f"State {st!r} not found in EZDriveMA plate state dropdown; try another state or contact support."
+            )
+
+    payload = _build_login_payload(hidden, inv, pl, state_code)
+    try:
+        resp = sess.post(LOGIN_URL, data=payload, timeout=timeout)
+        resp.raise_for_status()
+    except requests.RequestException as exc:
+        raise EzDriveMaError(f"POST to EZDriveMA failed: {exc}") from exc
+
+    post_html = resp.text
+    excerpt = post_html[:8000]
+
+    if not _response_indicates_invoice_found(post_html):
+        return False, {}, excerpt
+
+    details = _details_from_ezdrive_html(
+        post_html, invoice_number=inv, plate=pl, state_abbr=st
+    )
+    return True, details, excerpt
 
 
 def lookup_invoices_by_plate(
