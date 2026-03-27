@@ -406,8 +406,10 @@ class AlertService:
   late fees stack up.
 </p>
 {plate_block}
-<p style="margin:0 0 8px;font-size:14px;color:{COLOR_MUTED};font-family:{FONT_STACK};">
-  Open the app to explore your dashboard and notification settings.
+<p style="margin:0 0 16px;color:{COLOR_TEXT};font-family:{FONT_STACK};">
+  When you&apos;re ready to access your dashboard, go to
+  <a href="{html_module.escape(APP_ORIGIN, quote=True)}" style="color:{COLOR_ORANGE};font-weight:600;text-decoration:underline;">app.plateguard.io</a>
+  and click <strong>Email me a sign-in link</strong>.
 </p>
 <p style="margin:0;font-size:14px;color:{COLOR_MUTED};font-family:{FONT_STACK};">
   Questions? Reply to this email—we read every message.
