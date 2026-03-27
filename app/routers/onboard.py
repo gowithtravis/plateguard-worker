@@ -11,7 +11,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 from ..config import settings
-from ..rate_limit import enforce_onboard_rate_limit
+from ..limiter import get_forwarded_ip, limiter
 from ..services.alert_service import AlertService
 from ..services.onboard_service import OnboardError, OnboardService
 
@@ -63,14 +63,19 @@ class OnboardResponse(BaseModel):
 
 
 @router.post("/onboard", response_model=OnboardResponse)
+@limiter.limit(
+    "5/minute",
+    key_func=get_forwarded_ip,
+    error_message=(
+        "Too many waitlist requests from this address. Please wait a minute and try again."
+    ),
+)
 async def onboard_public_waitlist(request: Request, body: OnboardRequest):
     """
     Waitlist signup from the public website. Requires email only; optional name and phone.
 
-    **Not** protected by Bearer token — uses per-IP rate limiting (5/hour) instead.
+    **Not** protected by Bearer token — rate limited per IP (5/minute) via SlowAPI.
     """
-    enforce_onboard_rate_limit(request)
-
     if not settings.supabase_url or not settings.supabase_service_key:
         raise HTTPException(
             status_code=503,

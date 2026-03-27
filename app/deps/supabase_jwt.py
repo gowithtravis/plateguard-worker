@@ -9,29 +9,20 @@ import structlog
 from fastapi import HTTPException, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from ..config import settings
+from .supabase_client import supabase_client
 
 logger = structlog.get_logger()
 security = HTTPBearer()
 
 
 def _user_id_from_jwt_sync(token: str) -> str:
-    if not settings.supabase_url or not settings.supabase_service_key:
+    if not supabase_client:
         raise HTTPException(
             status_code=503,
             detail="Supabase is not configured",
         )
     try:
-        from supabase import create_client
-    except ImportError as exc:  # pragma: no cover
-        raise HTTPException(status_code=503, detail="Supabase client unavailable") from exc
-
-    client = create_client(
-        settings.supabase_url.rstrip("/"),
-        settings.supabase_service_key,
-    )
-    try:
-        resp = client.auth.get_user(token)
+        resp = supabase_client.auth.get_user(token)
     except Exception as exc:
         logger.warning("supabase_jwt_verify_failed", error=str(exc))
         raise HTTPException(

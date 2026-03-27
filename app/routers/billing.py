@@ -14,7 +14,9 @@ from pydantic import BaseModel, EmailStr
 import stripe
 
 from ..config import settings
+from ..deps.supabase_client import supabase_client
 from ..deps.supabase_jwt import verify_supabase_jwt
+from ..limiter import get_authed_rate_limit_key, limiter
 
 logger = structlog.get_logger()
 router = APIRouter()
@@ -50,24 +52,27 @@ def _require_stripe_configured() -> None:
 
 
 def _supabase_admin():
-    if not settings.supabase_url or not settings.supabase_service_key:
+    if not supabase_client:
         raise HTTPException(
             status_code=503,
             detail="Supabase is not configured",
         )
-    from supabase import create_client
-
-    return create_client(
-        settings.supabase_url.rstrip("/"),
-        settings.supabase_service_key,
-    )
+    return supabase_client
 
 
 @router.post(
     "/create-checkout-session",
     response_model=CreateCheckoutSessionResponse,
 )
+@limiter.limit(
+    "20/minute",
+    key_func=get_authed_rate_limit_key,
+    error_message=(
+        "Too many checkout session requests for your account. Please try again in about a minute."
+    ),
+)
 async def create_checkout_session(
+    request: Request,
     body: CreateCheckoutSessionRequest,
     auth_user_id: str = Depends(verify_supabase_jwt),
 ):
@@ -109,7 +114,15 @@ async def create_checkout_session(
     "/create-billing-portal-session",
     response_model=CreateBillingPortalResponse,
 )
+@limiter.limit(
+    "20/minute",
+    key_func=get_authed_rate_limit_key,
+    error_message=(
+        "Too many billing portal requests for your account. Please try again in about a minute."
+    ),
+)
 async def create_billing_portal_session(
+    request: Request,
     body: CreateBillingPortalRequest,
     auth_user_id: str = Depends(verify_supabase_jwt),
 ):

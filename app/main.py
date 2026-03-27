@@ -12,15 +12,22 @@ Endpoints:
 - POST /api/create-checkout-session    Stripe Checkout (Supabase JWT Bearer)
 - POST /api/create-billing-portal-session  Stripe Billing Portal (Supabase JWT Bearer)
 - POST /api/stripe-webhook             Stripe webhooks (signature only; no Bearer)
+
+Rate limits (SlowAPI / ``X-Forwarded-For``): ``/api/onboard`` & ``/api/signup/set-password`` 5/min per IP;
+``/api/check-plate``, ``/api/report-ticket``, ``/api/create-checkout-session``, ``/api/create-billing-portal-session``, ``/api/test-alert`` 20/min per user (JWT ``sub`` when Bearer is a JWT, else per IP);
+``/api/run-batch`` 1/min per IP; ``/api/health`` unlimited.
 """
 from contextlib import asynccontextmanager
 
 import structlog
-from fastapi import Depends, FastAPI, HTTPException, Security
+from fastapi import Depends, FastAPI, HTTPException, Request, Security
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from slowapi.errors import RateLimitExceeded
+from starlette.responses import JSONResponse
 
 from .config import settings
+from .limiter import limiter
 from .routers import billing, health, monitor, onboard, signup, tickets
 
 
@@ -53,6 +60,14 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+app.state.limiter = limiter
+
+
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded) -> JSONResponse:
+    """429 JSON body uses ``detail`` (matches FastAPI HTTPException style)."""
+    _ = request
+    return JSONResponse(status_code=429, content={"detail": exc.detail})
 
 # Public waitlist form on plateguard.io
 app.add_middleware(

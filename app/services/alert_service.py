@@ -14,12 +14,8 @@ import httpx
 import structlog
 
 from ..config import settings
+from ..deps.supabase_client import supabase_client
 from ..models.violation import Violation, ViolationStatus, ViolationType
-
-try:
-    from supabase import create_client  # type: ignore
-except Exception:  # pragma: no cover
-    create_client = None  # type: ignore[assignment]
 
 
 logger = structlog.get_logger()
@@ -54,13 +50,7 @@ LOGO_SVG = """
 
 class AlertService:
     def __init__(self) -> None:
-        if not (settings.supabase_url and settings.supabase_service_key and create_client):
-            self._client = None
-        else:
-            self._client = create_client(
-                settings.supabase_url,
-                settings.supabase_service_key,  # type: ignore[arg-type]
-            )
+        self._client = supabase_client
 
     def _branded_cta_button(self, href: str, label: str) -> str:
         """Primary CTA: orange fill, dark text, rounded (table-based for email clients)."""

@@ -14,7 +14,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, EmailStr, Field
 
 from ..config import settings
-from ..rate_limit import enforce_onboard_rate_limit
+from ..limiter import get_forwarded_ip, limiter
 from ..services.onboard_service import OnboardError, OnboardService
 
 
@@ -33,6 +33,13 @@ class SetPasswordResponse(BaseModel):
 
 
 @router.post("/set-password", response_model=SetPasswordResponse)
+@limiter.limit(
+    "5/minute",
+    key_func=get_forwarded_ip,
+    error_message=(
+        "Too many password attempts from this address. Please wait a minute and try again."
+    ),
+)
 async def set_password_for_existing_account(request: Request, body: SetPasswordRequest):
     """
     Set the Supabase Auth password for an **existing** user (same email as waitlist).
@@ -43,8 +50,6 @@ async def set_password_for_existing_account(request: Request, body: SetPasswordR
     (Client-only ``supabase.auth.updateUser({ password })`` requires an active session;
     this endpoint uses the service role so no session is needed first.)
     """
-    enforce_onboard_rate_limit(request)
-
     if not settings.supabase_url or not settings.supabase_service_key:
         raise HTTPException(
             status_code=503,

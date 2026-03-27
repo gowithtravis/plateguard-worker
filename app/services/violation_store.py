@@ -10,25 +10,16 @@ from typing import Any, Optional
 
 import structlog
 
-from ..config import settings
+from ..deps.supabase_client import supabase_client
 from ..portals.manual_ticket_portals import MANUAL_TICKET_PORTAL_LABELS
-
-try:
-    from supabase import create_client  # type: ignore
-except Exception:  # pragma: no cover - optional in scaffold
-    create_client = None  # type: ignore[assignment]
 
 
 logger = structlog.get_logger()
 
 
 class ViolationStore:
-    def __init__(self):
-        if not (settings.supabase_url and settings.supabase_service_key and create_client):
-            logger.warning("supabase_not_configured")
-            self.client = None
-        else:
-            self.client = create_client(settings.supabase_url, settings.supabase_service_key)  # type: ignore[arg-type]
+    def __init__(self) -> None:
+        self.client = supabase_client
 
     async def get_active_plates(self) -> list[dict]:
         """Fetch all active plates from Supabase (placeholder)."""

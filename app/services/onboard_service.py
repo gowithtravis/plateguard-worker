@@ -9,17 +9,12 @@ from typing import Optional
 
 import structlog
 
-from ..config import settings
+from ..deps.supabase_client import supabase_client
 
 try:
     from gotrue.errors import AuthApiError  # type: ignore
 except Exception:  # pragma: no cover
     AuthApiError = Exception  # type: ignore[misc,assignment]
-
-try:
-    from supabase import create_client  # type: ignore
-except Exception:  # pragma: no cover
-    create_client = None  # type: ignore[assignment]
 
 
 logger = structlog.get_logger()
@@ -46,11 +41,9 @@ class OnboardService:
     """Supabase Auth admin + profiles for plateguard.io waitlist signups."""
 
     def __init__(self) -> None:
-        self._url = (settings.supabase_url or "").rstrip("/")
-        self._key = settings.supabase_service_key or ""
-        if not self._url or not self._key or not create_client:
+        if not supabase_client:
             raise OnboardError("Supabase is not configured", status_code=503)
-        self._client = create_client(self._url, self._key)  # type: ignore[arg-type]
+        self._client = supabase_client
 
     def find_auth_user_id_by_email(self, email: str) -> Optional[str]:
         """List Auth users via admin API until a matching email is found."""

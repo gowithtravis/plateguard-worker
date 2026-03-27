@@ -6,10 +6,11 @@ from __future__ import annotations
 from typing import Literal, Optional
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from ..deps.supabase_jwt import verify_supabase_jwt
+from ..limiter import get_authed_rate_limit_key, limiter
 from ..services.monitor_service import MonitorService
 
 
@@ -48,7 +49,15 @@ class ReportTicketResponse(BaseModel):
 
 
 @router.post("/report-ticket", response_model=ReportTicketResponse)
+@limiter.limit(
+    "20/minute",
+    key_func=get_authed_rate_limit_key,
+    error_message=(
+        "Too many ticket report requests for your account. Please try again in about a minute."
+    ),
+)
 async def report_ticket(
+    request: Request,
     body: ReportTicketRequest,
     auth_user_id: str = Depends(verify_supabase_jwt),
 ) -> ReportTicketResponse:

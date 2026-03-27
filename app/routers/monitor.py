@@ -4,10 +4,11 @@ Monitor router — handles plate checking endpoints.
 from typing import Optional
 
 import structlog
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from pydantic import BaseModel, EmailStr, Field
 
 from ..config import settings
+from ..limiter import get_authed_rate_limit_key, get_forwarded_ip, limiter
 from ..services.alert_service import AlertService
 from ..services.monitor_service import MonitorService
 
@@ -56,7 +57,14 @@ class TestAlertResponse(BaseModel):
 
 
 @router.post("/test-alert", response_model=TestAlertResponse)
-async def test_alert(request: TestAlertRequest):
+@limiter.limit(
+    "20/minute",
+    key_func=get_authed_rate_limit_key,
+    error_message=(
+        "Too many test-alert requests. Please try again in about a minute."
+    ),
+)
+async def test_alert(request: Request, body: TestAlertRequest):
     """
     Send a sample new-violation email to the given address.
     Uses the same HTML template and Resend integration as production alerts.
@@ -68,7 +76,7 @@ async def test_alert(request: TestAlertRequest):
         )
 
     alerts = AlertService()
-    ok = await alerts.send_sample_alert_email(str(request.email))
+    ok = await alerts.send_sample_alert_email(str(body.email))
     if not ok:
         raise HTTPException(
             status_code=502,
@@ -82,7 +90,14 @@ async def test_alert(request: TestAlertRequest):
 
 
 @router.post("/check-plate", response_model=CheckResponse)
-async def check_plate(request: CheckPlateRequest):
+@limiter.limit(
+    "20/minute",
+    key_func=get_authed_rate_limit_key,
+    error_message=(
+        "Too many plate checks for this session. Please try again in about a minute."
+    ),
+)
+async def check_plate(request: Request, body: CheckPlateRequest):
     """
     Check a single plate across specified portals.
     Checks RMC Pay cities (Boston, New Bedford, Lowell, Brookline) and Cambridge (eTIMS)
@@ -91,23 +106,34 @@ async def check_plate(request: CheckPlateRequest):
     """
     service = MonitorService()
     result = await service.check_single_plate(
-        plate_number=request.plate_number,
-        state=request.state,
-        portals=request.portals,
+        plate_number=body.plate_number,
+        state=body.state,
+        portals=body.portals,
     )
     return result
 
 
 @router.post("/run-batch", response_model=BatchResponse)
-async def run_batch(request: RunBatchRequest, background_tasks: BackgroundTasks):
+@limiter.limit(
+    "1/minute",
+    key_func=get_forwarded_ip,
+    error_message=(
+        "The batch endpoint is limited to one request per minute. Please try again shortly."
+    ),
+)
+async def run_batch(
+    request: Request,
+    body: RunBatchRequest,
+    background_tasks: BackgroundTasks,
+):
     """
     Batch check endpoint stub.
     Currently runs synchronously with placeholder aggregation.
     """
-    logger.info("batch_check_triggered", source=request.source)
+    logger.info("batch_check_triggered", source=body.source)
 
     # For pg_cron: acknowledge immediately, run in background
-    if request.source == "pg_cron":
+    if body.source == "pg_cron":
         background_tasks.add_task(_run_batch_background)
         return BatchResponse(
             plates_checked=0,
