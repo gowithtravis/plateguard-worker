@@ -33,6 +33,7 @@ COLOR_MUTED = "#5C5C5C"
 COLOR_CARD_BORDER = "#C8C7C1"
 
 APP_ORIGIN = "https://app.plateguard.io"
+SIGNUP_URL = f"{APP_ORIGIN}/signup"
 
 # Inter + fallbacks (Google Fonts link in <head> for clients that support it)
 FONT_STACK = (
@@ -76,6 +77,17 @@ class AlertService:
     </td>
   </tr>
 </table>
+""".strip()
+
+    def _branded_secondary_text_link(self, href: str, label: str) -> str:
+        """Text-style link (navy underline) for secondary CTAs in marketing emails."""
+        safe_href = html_module.escape(href, quote=True)
+        safe_label = html_module.escape(label)
+        return f"""
+<p style="margin:8px 0 0;font-size:15px;line-height:1.5;font-family:{FONT_STACK};">
+  <a href="{safe_href}" target="_blank" rel="noopener noreferrer"
+     style="color:{COLOR_NAVY};font-weight:600;text-decoration:underline;">{safe_label}</a>
+</p>
 """.strip()
 
     def _branded_email_footer(self) -> str:
@@ -406,15 +418,20 @@ class AlertService:
   late fees stack up.
 </p>
 {plate_block}
-<p style="margin:0 0 16px;color:{COLOR_TEXT};font-family:{FONT_STACK};">
-  When you&apos;re ready to access your dashboard, go to
-  <a href="{html_module.escape(APP_ORIGIN, quote=True)}" style="color:{COLOR_ORANGE};font-weight:600;text-decoration:underline;">app.plateguard.io</a>
-  and click <strong>Email me a sign-in link</strong>.
+<p style="margin:0 0 12px;color:{COLOR_TEXT};font-family:{FONT_STACK};">
+  <strong>Access your dashboard</strong> at app.plateguard.io. On the sign-in page, use
+  <strong>Email me a magic link</strong> (or similar)—we&apos;ll email you a one-time link so you can sign in
+  without a password.
 </p>
-<p style="margin:0;font-size:14px;color:{COLOR_MUTED};font-family:{FONT_STACK};">
+{self._branded_cta_button(APP_ORIGIN, "Access Your Dashboard")}
+<p style="margin:16px 0 0;font-size:14px;color:{COLOR_MUTED};font-family:{FONT_STACK};line-height:1.5;">
+  Prefer to use a password? Visit the signup page with the <strong>same email</strong> you used on the waitlist
+  and create a password for your account—you&apos;ll be able to sign in with email and password from then on.
+</p>
+{self._branded_secondary_text_link(SIGNUP_URL, "Set up a password")}
+<p style="margin:20px 0 0;font-size:14px;color:{COLOR_MUTED};font-family:{FONT_STACK};">
   Questions? Reply to this email—we read every message.
 </p>
-{self._branded_cta_button(APP_ORIGIN, "Open PlateGuard")}
 """.strip()
 
         return self._build_branded_email_html(

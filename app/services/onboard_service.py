@@ -171,3 +171,39 @@ class OnboardService:
             user_id=user_id,
             already_registered=not created_new,
         )
+
+    def set_password_for_existing_user(self, email: str, password: str) -> None:
+        """
+        Set or replace the Auth password for an existing user (e.g. waitlist signup).
+
+        Used when the app signup flow detects the email already exists: the client can call
+        this endpoint (service role on the server), then ``signInWithPassword`` and redirect
+        to the dashboard—equivalent to ``supabase.auth.updateUser`` with a new password after
+        a session exists, but works without a prior client session.
+        """
+        email_clean = email.strip().lower()
+        pw = password or ""
+        if len(pw) < 8:
+            raise OnboardError("Password must be at least 8 characters", status_code=400)
+        if len(pw) > 72:
+            raise OnboardError("Password must be 72 characters or fewer", status_code=400)
+
+        uid = self.find_auth_user_id_by_email(email_clean)
+        if not uid:
+            raise OnboardError("No account found for this email", status_code=404)
+
+        try:
+            self._client.auth.admin.update_user_by_id(uid, {"password": pw})
+        except OnboardError:
+            raise
+        except AuthApiError as exc:
+            logger.warning(
+                "set_password_auth_api_error",
+                email=email_clean,
+                code=getattr(exc, "code", None),
+                message=str(exc),
+            )
+            raise OnboardError("Could not set password. Try a stronger password.", status_code=400) from exc
+        except Exception as exc:
+            logger.exception("set_password_failed", email=email_clean)
+            raise OnboardError("Could not set password", status_code=502) from exc

@@ -5,6 +5,7 @@ Endpoints:
 - GET  /api/health                     Health check
 - POST /api/test-alert                 Send sample violation alert email (Resend)
 - POST /api/onboard                    Public waitlist signup (CORS + rate limit; no Bearer)
+- POST /api/signup/set-password        Set password for existing Auth user (waitlist → app signup)
 - POST /api/check-plate                Check a single plate across all portals
 - POST /api/run-batch                  Check all active plates (placeholder)
 - POST /api/report-ticket              Manual ticket report (Kelley & Ryan / Somerville CHS; Supabase JWT)
@@ -20,7 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from .config import settings
-from .routers import billing, health, monitor, onboard, tickets
+from .routers import billing, health, monitor, onboard, signup, tickets
 
 
 logger = structlog.get_logger()
@@ -92,6 +93,11 @@ app.include_router(
     onboard.router,
     prefix="/api",
     tags=["onboard"],
+)
+app.include_router(
+    signup.router,
+    prefix="/api/signup",
+    tags=["signup"],
 )
 app.include_router(
     billing.router,
