@@ -98,12 +98,6 @@ async def onboard_public_waitlist(request: Request, body: OnboardRequest):
     except OnboardError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
 
-    if result.already_registered:
-        return OnboardResponse(
-            message="You're already on our waitlist — thanks for your interest!",
-            already_registered=True,
-        )
-
     try:
         alerts = AlertService()
         await alerts.send_waitlist_welcome_email(
@@ -114,6 +108,12 @@ async def onboard_public_waitlist(request: Request, body: OnboardRequest):
         )
     except Exception as exc:  # pragma: no cover
         logger.warning("waitlist_welcome_email_failed", error=str(exc))
+
+    if result.already_registered:
+        return OnboardResponse(
+            message="You're already on our waitlist — thanks for your interest!",
+            already_registered=True,
+        )
 
     return OnboardResponse(
         message="Thanks for joining the PlateGuard waitlist! Check your email to confirm.",
