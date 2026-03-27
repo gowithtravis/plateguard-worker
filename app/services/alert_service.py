@@ -1,5 +1,5 @@
 """
-Alert Service — sends notifications when new violations are detected.
+Alert Service - sends notifications when new violations are detected.
 
 Uses Resend for email. Looks up recipient via Supabase: plate → user_id → profiles.email.
 """
@@ -41,7 +41,7 @@ FONT_STACK = (
     "Helvetica, Arial, sans-serif"
 )
 
-# Inline PlateGuard shield (orange) — matches dashboard mark
+# Inline PlateGuard shield (orange) - matches dashboard mark
 LOGO_SVG = """
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 48" width="36" height="44" style="display:block;" aria-hidden="true">
   <path d="M20 2L4 9v14c0 9.4 6.8 18.2 16 20.4C29.2 41.2 36 32.4 36 23V9L20 2z" fill="#FF9A00"/>
@@ -96,7 +96,7 @@ class AlertService:
 <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin-top:28px;">
   <tr>
     <td style="padding:0 8px;text-align:center;font-family:{FONT_STACK};font-size:12px;line-height:1.6;color:{COLOR_MUTED};">
-      <p style="margin:0 0 8px;">PlateGuard — Credit monitoring for your license plate</p>
+      <p style="margin:0 0 8px;">PlateGuard - Credit monitoring for your license plate</p>
       <p style="margin:0;">
         <a href="{safe_unsub}" style="color:{COLOR_MUTED};text-decoration:underline;">Manage email preferences</a>
         <span style="color:{COLOR_MUTED};"> · </span>
@@ -289,14 +289,14 @@ class AlertService:
                     issue_date_str = str(v).strip()
                     break
 
-        amount_str = f"${amount:,.2f}" if amount is not None else "—"
+        amount_str = f"${amount:,.2f}" if amount is not None else "-"
 
         return {
-            "ticket_number": ticket or "—",
+            "ticket_number": ticket or "-",
             "amount_due": amount_str,
-            "description": description or "—",
-            "location": location or "—",
-            "issue_date": issue_date_str or "—",
+            "description": description or "-",
+            "location": location or "-",
+            "issue_date": issue_date_str or "-",
             "plate": f"{violation.plate_number} ({violation.state})",
             "portal": violation.source_portal.replace("_", " ").title(),
         }
@@ -344,7 +344,7 @@ class AlertService:
 """.strip()
 
         return self._build_branded_email_html(
-            page_title="New violation — PlateGuard",
+            page_title="New violation - PlateGuard",
             white_inner_html=inner,
         )
 
@@ -365,7 +365,7 @@ class AlertService:
             state="MA",
             amount_due=75.00,
             violation_description=(
-                "Sample: No parking during street cleaning (test alert — not a real ticket)"
+                "Sample: No parking during street cleaning (test alert - not a real ticket)"
             ),
             location="123 Example St, Boston, MA",
             issue_date=datetime(2026, 3, 1, 12, 0, 0),
@@ -373,7 +373,7 @@ class AlertService:
             raw_data={},
         )
         html_body = self._build_new_violation_html(sample)
-        subject = "PlateGuard: Test alert — sample violation email"
+        subject = "PlateGuard: Test alert - sample violation email"
         return await self.send_email(to_email.strip(), subject, html_body)
 
     def _build_waitlist_welcome_html(
@@ -414,23 +414,23 @@ class AlertService:
 <p style="margin:0 0 16px;color:{COLOR_TEXT};font-family:{FONT_STACK};">{thanks}</p>
 <p style="margin:0 0 18px;color:{COLOR_TEXT};font-family:{FONT_STACK};">
   <strong>What we do:</strong> PlateGuard monitors official government and toll portals on your behalf
-  so parking tickets, tolls, speed-camera, and red-light violations show up in one place—often before
+  so parking tickets, tolls, speed-camera, and red-light violations show up in one place, often before
   late fees stack up.
 </p>
 {plate_block}
 <p style="margin:0 0 12px;color:{COLOR_TEXT};font-family:{FONT_STACK};">
   <strong>Access your dashboard</strong> at app.plateguard.io. On the sign-in page, use
-  <strong>Email me a magic link</strong> (or similar)—we&apos;ll email you a one-time link so you can sign in
+  <strong>Email me a magic link</strong> (or similar). We&apos;ll email you a one-time link so you can sign in
   without a password.
 </p>
 {self._branded_cta_button(APP_ORIGIN, "Access Your Dashboard")}
 <p style="margin:16px 0 0;font-size:14px;color:{COLOR_MUTED};font-family:{FONT_STACK};line-height:1.5;">
   Prefer to use a password? Visit the signup page with the <strong>same email</strong> you used on the waitlist
-  and create a password for your account—you&apos;ll be able to sign in with email and password from then on.
+  and create a password for your account. You&apos;ll be able to sign in with email and password from then on.
 </p>
 {self._branded_secondary_text_link(SIGNUP_URL, "Set up a password")}
 <p style="margin:20px 0 0;font-size:14px;color:{COLOR_MUTED};font-family:{FONT_STACK};">
-  Questions? Reply to this email—we read every message.
+  Questions? Reply to this email. We read every message.
 </p>
 """.strip()
 
@@ -473,7 +473,7 @@ class AlertService:
 
             fields = self._violation_display_fields(violation)
             subject = (
-                f"PlateGuard: New violation — ticket {fields['ticket_number']} "
+                f"PlateGuard: New violation - ticket {fields['ticket_number']} "
                 f"({violation.plate_number})"
             )
             html_body = self._build_new_violation_html(violation)
