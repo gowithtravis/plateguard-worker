@@ -13,7 +13,7 @@ Endpoints:
 - POST /api/create-billing-portal-session  Stripe Billing Portal (Supabase JWT Bearer)
 - POST /api/stripe-webhook             Stripe webhooks (signature only; no Bearer)
 
-Rate limits (SlowAPI / ``X-Forwarded-For``): ``/api/onboard`` & ``/api/signup/set-password`` 5/min per IP;
+Rate limits (``X-Forwarded-For``): ``/api/onboard`` & ``/api/signup/set-password`` 5/min per IP (in-memory; SlowAPI decorators break JSON body binding on these routes);
 ``/api/check-plate``, ``/api/report-ticket``, ``/api/create-checkout-session``, ``/api/create-billing-portal-session``, ``/api/test-alert`` 20/min per user (JWT ``sub`` when Bearer is a JWT, else per IP);
 ``/api/run-batch`` 1/min per IP; ``/api/health`` unlimited.
 """

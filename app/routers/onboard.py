@@ -4,14 +4,14 @@ Public waitlist onboarding from plateguard.io (no API key; rate limited + CORS).
 from __future__ import annotations
 
 import asyncio
-from typing import Optional
+from typing import Annotated, Optional
 
 import structlog
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Body, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 from ..config import settings
-from ..limiter import get_forwarded_ip, limiter
+from ..limiter import enforce_minute_ip_limit
 from ..services.alert_service import AlertService
 from ..services.onboard_service import OnboardError, OnboardService
 
@@ -63,19 +63,25 @@ class OnboardResponse(BaseModel):
 
 
 @router.post("/onboard", response_model=OnboardResponse)
-@limiter.limit(
-    "5/minute",
-    key_func=get_forwarded_ip,
-    error_message=(
-        "Too many waitlist requests from this address. Please wait a minute and try again."
-    ),
-)
-async def onboard_public_waitlist(request: Request, body: OnboardRequest):
+async def onboard_public_waitlist(
+    request: Request,
+    payload: Annotated[OnboardRequest, Body(...)],
+):
     """
     Waitlist signup from the public website. Requires email only; optional name and phone.
 
-    **Not** protected by Bearer token — rate limited per IP (5/minute) via SlowAPI.
+    **Not** protected by Bearer token — rate limited per IP (5/minute).
     """
+    enforce_minute_ip_limit(
+        request,
+        scope="onboard",
+        max_requests=5,
+        window_seconds=60,
+        detail=(
+            "Too many waitlist requests from this address. Please wait a minute and try again."
+        ),
+    )
+
     if not settings.supabase_url or not settings.supabase_service_key:
         raise HTTPException(
             status_code=503,
@@ -87,18 +93,18 @@ async def onboard_public_waitlist(request: Request, body: OnboardRequest):
     except OnboardError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
 
-    fn = body.first_name
-    ln = body.last_name
-    phone = body.phone
+    fn = payload.first_name
+    ln = payload.last_name
+    phone = payload.phone
 
     try:
         result = await asyncio.to_thread(
             svc.process_public_waitlist_signup,
-            str(body.email),
+            str(payload.email),
             fn,
             ln,
             phone,
-            body.dob_mmdd,
+            payload.dob_mmdd,
         )
     except OnboardError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
@@ -106,7 +112,7 @@ async def onboard_public_waitlist(request: Request, body: OnboardRequest):
     try:
         alerts = AlertService()
         await alerts.send_waitlist_welcome_email(
-            str(body.email),
+            str(payload.email),
             fn or "",
             ln or "",
             None,

@@ -4,14 +4,20 @@ SlowAPI rate limiting (shared limiter + key functions).
 Uses ``X-Forwarded-For`` first hop when present (Railway / reverse proxy).
 JWT routes: buckets by unverified ``sub`` from Bearer token when it looks like a JWT;
 otherwise falls back to client IP (e.g. worker API key).
+
+Public JSON-body routes (e.g. ``/api/onboard``) cannot use ``@limiter.limit`` on the
+handler: SlowAPI's wrapper exposes ``*args, **kwargs`` and FastAPI then fails to bind the
+Pydantic body (422). Those routes use :func:`enforce_minute_ip_limit` instead.
 """
 from __future__ import annotations
 
 import base64
 import json
+import time
+from collections import defaultdict, deque
 from typing import Optional
 
-from fastapi import Request
+from fastapi import HTTPException, Request
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
@@ -54,3 +60,30 @@ def get_authed_rate_limit_key(request: Request) -> str:
 
 
 limiter = Limiter(key_func=get_forwarded_ip)
+
+# In-memory rolling window for routes that cannot use SlowAPI decorators (see module doc).
+_minute_ip_buckets: dict[str, deque[float]] = defaultdict(deque)
+
+
+def enforce_minute_ip_limit(
+    request: Request,
+    *,
+    scope: str,
+    max_requests: int,
+    window_seconds: int = 60,
+    detail: str,
+) -> None:
+    """
+    Enforce ``max_requests`` per ``window_seconds`` per client IP (``X-Forwarded-For``).
+
+    Raises ``HTTPException(429)`` with ``detail`` when exceeded.
+    """
+    ip = get_forwarded_ip(request)
+    key = f"{scope}:{ip}"
+    now = time.monotonic()
+    q = _minute_ip_buckets[key]
+    while q and (now - q[0]) > window_seconds:
+        q.popleft()
+    if len(q) >= max_requests:
+        raise HTTPException(status_code=429, detail=detail)
+    q.append(now)

@@ -8,13 +8,14 @@ call ``POST /api/signup/set-password`` with the same email and chosen password, 
 from __future__ import annotations
 
 import asyncio
+from typing import Annotated
 
 import structlog
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Body, HTTPException, Request
 from pydantic import BaseModel, EmailStr, Field
 
 from ..config import settings
-from ..limiter import get_forwarded_ip, limiter
+from ..limiter import enforce_minute_ip_limit
 from ..services.onboard_service import OnboardError, OnboardService
 
 
@@ -33,14 +34,10 @@ class SetPasswordResponse(BaseModel):
 
 
 @router.post("/set-password", response_model=SetPasswordResponse)
-@limiter.limit(
-    "5/minute",
-    key_func=get_forwarded_ip,
-    error_message=(
-        "Too many password attempts from this address. Please wait a minute and try again."
-    ),
-)
-async def set_password_for_existing_account(request: Request, body: SetPasswordRequest):
+async def set_password_for_existing_account(
+    request: Request,
+    payload: Annotated[SetPasswordRequest, Body(...)],
+):
     """
     Set the Supabase Auth password for an **existing** user (same email as waitlist).
 
@@ -50,6 +47,16 @@ async def set_password_for_existing_account(request: Request, body: SetPasswordR
     (Client-only ``supabase.auth.updateUser({ password })`` requires an active session;
     this endpoint uses the service role so no session is needed first.)
     """
+    enforce_minute_ip_limit(
+        request,
+        scope="signup_set_password",
+        max_requests=5,
+        window_seconds=60,
+        detail=(
+            "Too many password attempts from this address. Please wait a minute and try again."
+        ),
+    )
+
     if not settings.supabase_url or not settings.supabase_service_key:
         raise HTTPException(
             status_code=503,
@@ -64,8 +71,8 @@ async def set_password_for_existing_account(request: Request, body: SetPasswordR
     try:
         await asyncio.to_thread(
             svc.set_password_for_existing_user,
-            str(body.email),
-            body.password,
+            str(payload.email),
+            payload.password,
         )
     except OnboardError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
