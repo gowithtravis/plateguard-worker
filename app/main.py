@@ -5,6 +5,7 @@ Endpoints:
 - GET  /api/health                     Health check
 - POST /api/test-alert                 Send sample violation alert email (Resend)
 - POST /api/onboard                    Public waitlist signup (CORS + rate limit; no Bearer)
+- POST /api/check-plate-free           Anonymous RMC-only plate check (3/hour per IP; JSON body max 1KB; honeypot field ``website``; no Bearer)
 - POST /api/signup/set-password        Set password for existing Auth user (waitlist → app signup)
 - POST /api/check-plate                Check a single plate across all portals
 - POST /api/run-batch                  Check all active plates (placeholder)
@@ -13,7 +14,7 @@ Endpoints:
 - POST /api/create-billing-portal-session  Stripe Billing Portal (Supabase JWT Bearer)
 - POST /api/stripe-webhook             Stripe webhooks (signature only; no Bearer)
 
-Rate limits (``X-Forwarded-For``): ``/api/onboard`` & ``/api/signup/set-password`` 5/min per IP (in-memory; SlowAPI decorators break JSON body binding on these routes);
+Rate limits (``X-Forwarded-For``): ``/api/check-plate-free`` 3/hour per IP; ``/api/onboard`` & ``/api/signup/set-password`` 5/min per IP (in-memory; SlowAPI decorators break JSON body binding on these routes);
 ``/api/check-plate``, ``/api/report-ticket``, ``/api/create-checkout-session``, ``/api/create-billing-portal-session``, ``/api/test-alert`` 20/min per user (JWT ``sub`` when Bearer is a JWT, else per IP);
 ``/api/run-batch`` 1/min per IP; ``/api/health`` unlimited.
 """
@@ -28,7 +29,8 @@ from starlette.responses import JSONResponse
 
 from .config import settings
 from .limiter import limiter
-from .routers import billing, health, monitor, onboard, signup, tickets
+from .middleware.check_plate_free_body_limit import check_plate_free_body_size_middleware
+from .routers import billing, check_plate_free, health, monitor, onboard, signup, tickets
 
 
 logger = structlog.get_logger()
@@ -82,6 +84,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.middleware("http")(check_plate_free_body_size_middleware)
+
 
 async def verify_api_key(
     credentials: HTTPAuthorizationCredentials = Security(security),
@@ -93,6 +97,11 @@ async def verify_api_key(
 
 # Routers
 app.include_router(health.router, prefix="/api", tags=["health"])
+app.include_router(
+    check_plate_free.router,
+    prefix="/api",
+    tags=["check-plate-free"],
+)
 app.include_router(
     monitor.router,
     prefix="/api",
