@@ -1,7 +1,7 @@
 """
 SlowAPI rate limiting (shared limiter + key functions).
 
-Uses ``X-Forwarded-For`` first hop when present (Railway / reverse proxy).
+Uses ``X-Forwarded-For`` (leftmost client), then ``CF-Connecting-IP`` / ``True-Client-IP`` / ``X-Real-IP`` when present, so limits track end users behind reverse proxies.
 JWT routes: buckets by unverified ``sub`` from Bearer token when it looks like a JWT;
 otherwise falls back to client IP (e.g. worker API key).
 
@@ -23,10 +23,30 @@ from slowapi.util import get_remote_address
 
 
 def get_forwarded_ip(request: Request) -> str:
-    """Client IP: first address in ``X-Forwarded-For``, else socket client."""
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip() or get_remote_address(request)
+    """
+    Client IP behind reverse proxies.
+
+    Prefer the leftmost non-empty address in ``X-Forwarded-For`` (original client per
+    common proxy chains). If that header is absent, fall back to ``CF-Connecting-IP``,
+    ``True-Client-IP``, or ``X-Real-IP`` (many CDNs / nginx set one of these). Only if
+    none are present do we use the TCP peer (often the proxy), which would bucket all
+    users together.
+    """
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        for part in xff.split(","):
+            candidate = part.strip()
+            if candidate:
+                return candidate
+
+    for header in ("cf-connecting-ip", "true-client-ip", "x-real-ip"):
+        raw = request.headers.get(header)
+        if not raw:
+            continue
+        candidate = raw.strip().split(",")[0].strip()
+        if candidate:
+            return candidate
+
     return get_remote_address(request)
 
 
@@ -74,7 +94,7 @@ def enforce_minute_ip_limit(
     detail: str,
 ) -> None:
     """
-    Enforce ``max_requests`` per ``window_seconds`` per client IP (``X-Forwarded-For``).
+    Enforce ``max_requests`` per ``window_seconds`` per client IP (see :func:`get_forwarded_ip`).
 
     Raises ``HTTPException(429)`` with ``detail`` when exceeded.
     """

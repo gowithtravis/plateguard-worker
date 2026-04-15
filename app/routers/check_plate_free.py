@@ -130,11 +130,11 @@ async def check_plate_free(
     enforce_minute_ip_limit(
         request,
         scope="free_plate_check",
-        max_requests=3,
+        max_requests=10,
         window_seconds=3600,
         detail=(
             "Too many free plate checks from this address. You can try again in up to an hour "
-            "(limit: 3 checks per hour per IP)."
+            "(limit: 10 checks per hour per IP)."
         ),
     )
 
