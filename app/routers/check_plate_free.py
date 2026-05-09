@@ -21,7 +21,7 @@ from pydantic import (
 )
 
 from ..config import settings
-from ..constants.us_states import US_STATE_CODES
+from ..constants.us_states import US_STATE_CODES, US_STATE_NAME_TO_CODE
 from ..limiter import enforce_minute_ip_limit, get_forwarded_ip
 from ..portals.rmc_parking import default_rmc_portal_labels
 from ..services.alert_service import AlertService
@@ -45,7 +45,10 @@ def _normalize_plate_for_free_check(raw: str) -> str:
 def _validate_state_code(state: Optional[str]) -> str:
     s = (state or "MA").strip().upper()
     if s not in US_STATE_CODES:
-        raise ValueError("invalid_state")
+        mapped = US_STATE_NAME_TO_CODE.get(s)
+        if not mapped:
+            raise ValueError("invalid_state")
+        return mapped
     return s
 
 
@@ -57,7 +60,7 @@ class CheckPlateFreeRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     plate_number: str = Field(default="", max_length=64)
-    state: str = Field(default="MA", max_length=8)
+    state: str = Field(default="MA", max_length=32)
     # Plain str so bots can send junk + ``website`` honeypot without failing before the handler.
     email: Optional[str] = Field(default=None, max_length=320)
     website: Optional[str] = Field(default=None, max_length=512)
