@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     # Browserbase
     browserbase_api_key: Optional[str] = ""
     browserbase_project_id: Optional[str] = ""
+    # RMC Pay (AWS WAF + PerimeterX): route JSON API via Browserbase + Playwright when true
+    rmc_use_browserbase: bool = False
 
     # 2Captcha (Cambridge eTIMS image CAPTCHA)
     twocaptcha_api_key: Optional[str] = ""

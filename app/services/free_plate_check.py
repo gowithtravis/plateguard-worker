@@ -4,6 +4,7 @@ Anonymous RMC Pay-only plate checks (no Supabase, no Cambridge / EZDriveMA).
 from __future__ import annotations
 
 import time
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -11,7 +12,11 @@ import requests
 import structlog
 
 from ..config import settings
-from ..portals.rmc_parking import check_plate_tickets_for_portal, default_rmc_portal_labels
+from ..portals.rmc_parking import (
+    check_plate_tickets_for_portal,
+    default_rmc_portal_labels,
+    rmc_browserbase_shared_session,
+)
 from .monitor_service import MonitorService
 
 logger = structlog.get_logger()
@@ -59,55 +64,61 @@ def check_plate_free_rmc_sync(plate_number: str, state: str) -> Tuple[List[Dict[
     sess = requests.Session()
     delay = float(getattr(settings, "request_delay_seconds", 0) or 0)
 
-    for portal_label in default_rmc_portal_labels():
-        portals_checked.append(_portal_display_name(portal_label))
-        city = _portal_display_name(portal_label)
-        try:
-            result = check_plate_tickets_for_portal(
-                portal_label,
-                plate,
-                st,
-                session=sess,
-                timeout=20.0,
-            )
-            for t in result.get("tickets") or []:
-                raw = t.get("raw") if isinstance(t, dict) else {}
-                if not isinstance(raw, dict):
-                    raw = {}
-                ticket_number = str(
-                    t.get("violation_number")
-                    or t.get("violation_id")
-                    or raw.get("violation_number")
-                    or raw.get("violation_id")
-                    or ""
-                ).strip()
-                if not ticket_number:
-                    continue
-                amount = MonitorService._coerce_float(
-                    raw.get("amount_due")
-                    or raw.get("fine_amount")
-                    or raw.get("balance")
-                    or raw.get("amount")
-                    or raw.get("violation_amount")
-                    or raw.get("total_amount")
+    bb_ctx = (
+        rmc_browserbase_shared_session()
+        if settings.rmc_use_browserbase
+        else nullcontext()
+    )
+    with bb_ctx:
+        for portal_label in default_rmc_portal_labels():
+            portals_checked.append(_portal_display_name(portal_label))
+            city = _portal_display_name(portal_label)
+            try:
+                result = check_plate_tickets_for_portal(
+                    portal_label,
+                    plate,
+                    st,
+                    session=sess,
+                    timeout=20.0,
                 )
-                violations.append(
-                    {
-                        "city": city,
-                        "amount": amount,
-                        "date": _issue_date_str(raw),
-                        "status": _status_from_raw(raw),
-                    }
+                for t in result.get("tickets") or []:
+                    raw = t.get("raw") if isinstance(t, dict) else {}
+                    if not isinstance(raw, dict):
+                        raw = {}
+                    ticket_number = str(
+                        t.get("violation_number")
+                        or t.get("violation_id")
+                        or raw.get("violation_number")
+                        or raw.get("violation_id")
+                        or ""
+                    ).strip()
+                    if not ticket_number:
+                        continue
+                    amount = MonitorService._coerce_float(
+                        raw.get("amount_due")
+                        or raw.get("fine_amount")
+                        or raw.get("balance")
+                        or raw.get("amount")
+                        or raw.get("violation_amount")
+                        or raw.get("total_amount")
+                    )
+                    violations.append(
+                        {
+                            "city": city,
+                            "amount": amount,
+                            "date": _issue_date_str(raw),
+                            "status": _status_from_raw(raw),
+                        }
+                    )
+            except Exception as exc:  # pragma: no cover - per-portal resilience
+                plate_prefix = plate[:3] if len(plate) >= 3 else plate
+                logger.warning(
+                    "free_plate_check_portal_failed",
+                    portal=portal_label,
+                    plate_prefix=plate_prefix,
+                    error=str(exc),
                 )
-        except Exception as exc:  # pragma: no cover - per-portal resilience
-            plate_prefix = plate[:3] if len(plate) >= 3 else plate
-            logger.warning(
-                "free_plate_check_portal_failed",
-                portal=portal_label,
-                plate_prefix=plate_prefix,
-                error=str(exc),
-            )
-        if delay > 0:
-            time.sleep(delay)
+            if delay > 0:
+                time.sleep(delay)
 
     return violations, portals_checked

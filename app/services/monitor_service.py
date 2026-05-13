@@ -35,6 +35,7 @@ from ..portals.rmc_parking import (
     RMC_PAY_PORTALS,
     check_plate_tickets_for_portal,
     default_rmc_portal_labels,
+    rmc_browserbase_shared_session,
 )
 from ..portals.somerville_chs import (
     SOMERVILLE_CHS_PORTAL,
@@ -89,6 +90,141 @@ class MonitorService:
         self.store = ViolationStore()
         self.alerts = AlertService()
 
+    async def _run_portal_check(
+        self,
+        portal_name: str,
+        *,
+        plate_number: str,
+        state: str,
+        plate_id: Optional[str],
+        user_id: Optional[str],
+        all_violations: list[Violation],
+        new_violations: list[Violation],
+        checked: list[str],
+        errors: list[str],
+    ) -> None:
+        """Run a single portal from :meth:`check_single_plate` (Cambridge, RMC Pay, or error)."""
+        if portal_name == CAMBRIDGE_PORTAL_LABEL:
+            if not browserbase_configured():
+                logger.warning(
+                    "cambridge_skipped_browserbase_not_configured",
+                    plate_number=plate_number,
+                )
+                return
+            if not twocaptcha_configured():
+                logger.warning(
+                    "cambridge_skipped_twocaptcha_not_configured",
+                    plate_number=plate_number,
+                )
+                return
+            if not user_id:
+                logger.warning(
+                    "cambridge_skipped_no_user_id",
+                    plate_number=plate_number,
+                )
+                return
+            dob_mmdd = self.store.get_profile_dob_mmdd_sync(user_id)
+            if not dob_mmdd:
+                logger.warning(
+                    "cambridge_skipped_no_dob_mmdd",
+                    user_id=user_id,
+                    plate_number=plate_number,
+                )
+                return
+            try:
+                tickets = await asyncio.to_thread(
+                    search_violations_sync,
+                    plate_number,
+                    state,
+                    dob_mmdd,
+                )
+                checked.append(portal_name)
+                portal_new = 0
+                for ticket in tickets:
+                    violation = self._from_rmc_ticket(
+                        ticket,
+                        plate_number,
+                        state,
+                        plate_id=plate_id,
+                        source_portal=portal_name,
+                    )
+                    all_violations.append(violation)
+                    is_new = await self.store.upsert_violation(violation)
+                    if is_new:
+                        new_violations.append(violation)
+                        portal_new += 1
+                await self.store.log_check(
+                    plate_number=plate_number,
+                    state=state,
+                    portal=portal_name,
+                    status="success",
+                    violations_found=len(tickets),
+                    new_violations=portal_new,
+                    plate_id=plate_id,
+                )
+                await asyncio.sleep(settings.request_delay_seconds)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.error("portal_check_failed", portal=portal_name, error=str(exc))
+                errors.append(f"{portal_name}: {exc}")
+                await self.store.log_check(
+                    plate_number=plate_number,
+                    state=state,
+                    portal=portal_name,
+                    status="error",
+                    error_message=str(exc),
+                    plate_id=plate_id,
+                )
+            return
+
+        if portal_name not in RMC_PAY_PORTALS:
+            errors.append(f"Unknown portal: {portal_name}")
+            return
+
+        try:
+            result = check_plate_tickets_for_portal(portal_name, plate_number, state)
+            checked.append(portal_name)
+
+            tickets = result.get("tickets", [])
+            portal_new = 0
+            for ticket in tickets:
+                violation = self._from_rmc_ticket(
+                    ticket,
+                    plate_number,
+                    state,
+                    plate_id=plate_id,
+                    source_portal=portal_name,
+                )
+                all_violations.append(violation)
+
+                is_new = await self.store.upsert_violation(violation)
+                if is_new:
+                    new_violations.append(violation)
+                    portal_new += 1
+
+            await self.store.log_check(
+                plate_number=plate_number,
+                state=state,
+                portal=portal_name,
+                status="success",
+                violations_found=len(tickets),
+                new_violations=portal_new,
+                plate_id=plate_id,
+            )
+
+            await asyncio.sleep(settings.request_delay_seconds)
+
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.error("portal_check_failed", portal=portal_name, error=str(exc))
+            errors.append(f"{portal_name}: {exc}")
+            await self.store.log_check(
+                plate_number=plate_number,
+                state=state,
+                portal=portal_name,
+                status="error",
+                error_message=str(exc),
+                plate_id=plate_id,
+            )
+
     async def check_single_plate(
         self,
         plate_number: str,
@@ -105,127 +241,46 @@ class MonitorService:
         errors: list[str] = []
         checked: list[str] = []
 
-        for portal_name in to_check:
-            if portal_name == CAMBRIDGE_PORTAL_LABEL:
-                if not browserbase_configured():
-                    logger.warning(
-                        "cambridge_skipped_browserbase_not_configured",
-                        plate_number=plate_number,
-                    )
-                    continue
-                if not twocaptcha_configured():
-                    logger.warning(
-                        "cambridge_skipped_twocaptcha_not_configured",
-                        plate_number=plate_number,
-                    )
-                    continue
-                if not user_id:
-                    logger.warning(
-                        "cambridge_skipped_no_user_id",
-                        plate_number=plate_number,
-                    )
-                    continue
-                dob_mmdd = self.store.get_profile_dob_mmdd_sync(user_id)
-                if not dob_mmdd:
-                    logger.warning(
-                        "cambridge_skipped_no_dob_mmdd",
-                        user_id=user_id,
-                        plate_number=plate_number,
-                    )
-                    continue
-                try:
-                    tickets = await asyncio.to_thread(
-                        search_violations_sync,
-                        plate_number,
-                        state,
-                        dob_mmdd,
-                    )
-                    checked.append(portal_name)
-                    portal_new = 0
-                    for ticket in tickets:
-                        violation = self._from_rmc_ticket(
-                            ticket,
-                            plate_number,
-                            state,
+        i = 0
+        while i < len(to_check):
+            portal_name = to_check[i]
+
+            if (
+                settings.rmc_use_browserbase
+                and browserbase_configured()
+                and portal_name in RMC_PAY_PORTALS
+            ):
+                j = i
+                while j < len(to_check) and to_check[j] in RMC_PAY_PORTALS:
+                    j += 1
+                with rmc_browserbase_shared_session():
+                    for k in range(i, j):
+                        await self._run_portal_check(
+                            to_check[k],
+                            plate_number=plate_number,
+                            state=state,
                             plate_id=plate_id,
-                            source_portal=portal_name,
+                            user_id=user_id,
+                            all_violations=all_violations,
+                            new_violations=new_violations,
+                            checked=checked,
+                            errors=errors,
                         )
-                        all_violations.append(violation)
-                        is_new = await self.store.upsert_violation(violation)
-                        if is_new:
-                            new_violations.append(violation)
-                            portal_new += 1
-                    await self.store.log_check(
-                        plate_number=plate_number,
-                        state=state,
-                        portal=portal_name,
-                        status="success",
-                        violations_found=len(tickets),
-                        new_violations=portal_new,
-                        plate_id=plate_id,
-                    )
-                    await asyncio.sleep(settings.request_delay_seconds)
-                except Exception as exc:  # pragma: no cover - defensive
-                    logger.error("portal_check_failed", portal=portal_name, error=str(exc))
-                    errors.append(f"{portal_name}: {exc}")
-                    await self.store.log_check(
-                        plate_number=plate_number,
-                        state=state,
-                        portal=portal_name,
-                        status="error",
-                        error_message=str(exc),
-                        plate_id=plate_id,
-                    )
+                i = j
                 continue
 
-            if portal_name not in RMC_PAY_PORTALS:
-                errors.append(f"Unknown portal: {portal_name}")
-                continue
-
-            try:
-                result = check_plate_tickets_for_portal(portal_name, plate_number, state)
-                checked.append(portal_name)
-
-                tickets = result.get("tickets", [])
-                portal_new = 0
-                for ticket in tickets:
-                    violation = self._from_rmc_ticket(
-                        ticket,
-                        plate_number,
-                        state,
-                        plate_id=plate_id,
-                        source_portal=portal_name,
-                    )
-                    all_violations.append(violation)
-
-                    is_new = await self.store.upsert_violation(violation)
-                    if is_new:
-                        new_violations.append(violation)
-                        portal_new += 1
-
-                await self.store.log_check(
-                    plate_number=plate_number,
-                    state=state,
-                    portal=portal_name,
-                    status="success",
-                    violations_found=len(tickets),
-                    new_violations=portal_new,
-                    plate_id=plate_id,
-                )
-
-                await asyncio.sleep(settings.request_delay_seconds)
-
-            except Exception as exc:  # pragma: no cover - defensive
-                logger.error("portal_check_failed", portal=portal_name, error=str(exc))
-                errors.append(f"{portal_name}: {exc}")
-                await self.store.log_check(
-                    plate_number=plate_number,
-                    state=state,
-                    portal=portal_name,
-                    status="error",
-                    error_message=str(exc),
-                    plate_id=plate_id,
-                )
+            await self._run_portal_check(
+                portal_name,
+                plate_number=plate_number,
+                state=state,
+                plate_id=plate_id,
+                user_id=user_id,
+                all_violations=all_violations,
+                new_violations=new_violations,
+                checked=checked,
+                errors=errors,
+            )
+            i += 1
 
         if new_violations:
             await self.alerts.send_new_violation_alerts(new_violations)

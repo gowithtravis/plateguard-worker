@@ -10,16 +10,29 @@ when running a plate search on the city's portal if lookups fail or return non-J
 
 Optional per-portal key **``api_base_path``** overrides the default RMC API base path if a
 city uses a different URL layout (see logs for the exact ``url`` requested).
+
+When ``RMC_USE_BROWSERBASE`` is enabled, lookups run in Browserbase (Playwright) so
+AWS WAF and PerimeterX can issue cookies before the JSON API is called.
 """
 from __future__ import annotations
 
 import dataclasses
 import logging
-from typing import Any, Dict, List, Optional
+import time
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, Iterator, List, Optional
+from urllib.parse import urlencode
 
 import requests
+import structlog
+
+from ..config import settings
+from .cambridge_etims import browserbase_configured
 
 logger = logging.getLogger(__name__)
+slog = structlog.get_logger(__name__)
 
 # City display name (stored in plates.portals & violations.source_portal) → RMC host + operatorid
 # Optional ``api_base_path`` overrides DEFAULT_RMC_API_BASE_PATH for non-standard deployments.
@@ -87,6 +100,77 @@ class RmcViolation:
 
 DEFAULT_RMC_API_BASE_PATH = "/rmcapi/api/violation_index.php"
 
+RMC_BROWSERBASE_SESSION_API_TIMEOUT_S = 120
+
+
+@dataclass
+class _RmcBbShared:
+    session_id: str
+    page: Any
+    close: Callable[[], None]
+
+
+_rmc_bb_shared: ContextVar[Optional[_RmcBbShared]] = ContextVar("_rmc_bb_shared", default=None)
+
+
+def _create_browserbase_playwright_page() -> tuple[Any, Any, str, Callable[[], None]]:
+    """Browserbase session + Playwright; returns (page, playwright_module_handle, session_id, close)."""
+    from browserbase import Browserbase
+    from playwright.sync_api import sync_playwright
+
+    bb = Browserbase(api_key=settings.browserbase_api_key.strip())
+    bb_session = bb.sessions.create(
+        project_id=settings.browserbase_project_id.strip(),
+        api_timeout=RMC_BROWSERBASE_SESSION_API_TIMEOUT_S,
+    )
+    playwright = sync_playwright().start()
+    browser = playwright.chromium.connect_over_cdp(bb_session.connect_url)
+    context = browser.contexts[0] if browser.contexts else browser.new_context()
+    page = context.new_page()
+
+    def _close() -> None:
+        try:
+            page.close()
+        except Exception:
+            pass
+        try:
+            browser.close()
+        except Exception:
+            pass
+        try:
+            playwright.stop()
+        except Exception:
+            pass
+
+    return page, playwright, bb_session.id, _close
+
+
+@contextmanager
+def rmc_browserbase_shared_session() -> Iterator[None]:
+    """
+    Hold one Browserbase session across multiple RMC portal checks (same ``Page``, many hosts).
+
+    Sets :data:`_rmc_bb_shared` for nested :func:`search_tickets` calls. No-op when
+    ``rmc_use_browserbase`` is false.
+    """
+    if not settings.rmc_use_browserbase:
+        yield
+        return
+    if not browserbase_configured():
+        raise RmcParkingError(
+            "RMC_USE_BROWSERBASE is enabled but Browserbase is not configured "
+            "(BROWSERBASE_API_KEY / BROWSERBASE_PROJECT_ID)"
+        )
+
+    page, _pw, session_id, close = _create_browserbase_playwright_page()
+    holder = _RmcBbShared(session_id=session_id, page=page, close=close)
+    token = _rmc_bb_shared.set(holder)
+    try:
+        yield
+    finally:
+        _rmc_bb_shared.reset(token)
+        close()
+
 
 def _api_base_url(host: str, api_base_path: Optional[str] = None) -> str:
     host = host.strip().lower().rstrip("/")
@@ -119,6 +203,138 @@ def _build_search_params(
     }
 
 
+def _violations_from_api_payload(
+    payload: Dict[str, Any], params: Dict[str, str], *, host: str
+) -> List[RmcViolation]:
+    status = payload.get("status")
+    errorcode = payload.get("errorcode")
+
+    if status == 404 and errorcode == 10:
+        return []
+
+    if status != 200 or errorcode not in (0, None):
+        reason = payload.get("reason") or "Unknown error"
+        raise RmcParkingError(
+            f"RMC Pay API error ({host}) {status} (code {errorcode}): {reason}"
+        )
+
+    data = payload.get("data") or []
+    violations: List[RmcViolation] = []
+
+    for item in data:
+        try:
+            violation_id = str(item.get("violation_id") or "")
+            violation_number = str(item.get("violation_number") or "")
+            lpn = str(item.get("lpn") or params["lpn"])
+            stateid = str(item.get("stateid") or params["stateid"])
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("Skipping malformed violation item: %r (%s)", item, exc)
+            continue
+
+        if not violation_id or not violation_number:
+            logger.debug("Skipping violation with missing ids: %r", item)
+            continue
+
+        violations.append(
+            RmcViolation(
+                violation_id=violation_id,
+                violation_number=violation_number,
+                plate=lpn,
+                state=stateid,
+                raw=item,
+            )
+        )
+
+    return violations
+
+
+def _search_tickets_via_browserbase(
+    plate: str,
+    state: str,
+    *,
+    host: str,
+    operator_id: str,
+    api_base_path: Optional[str] = None,
+    timeout_ms: int,
+) -> List[RmcViolation]:
+    if not browserbase_configured():
+        raise RmcParkingError(
+            "RMC_USE_BROWSERBASE is enabled but Browserbase is not configured "
+            "(BROWSERBASE_API_KEY / BROWSERBASE_PROJECT_ID)"
+        )
+
+    params = _build_search_params(plate, state, operator_id)
+    base = _api_base_url(host, api_base_path)
+    search_url = f"{base}/searchviolation"
+    full_url = f"{search_url}?{urlencode(params)}"
+    origin = f"https://{host.strip().lower()}"
+
+    shared = _rmc_bb_shared.get()
+    ephemeral_close: Optional[Callable[[], None]] = None
+    if shared is not None:
+        page = shared.page
+        session_id = shared.session_id
+    else:
+        page, _pw, session_id, ephemeral_close = _create_browserbase_playwright_page()
+
+    try:
+        page.goto(origin, wait_until="domcontentloaded", timeout=timeout_ms)
+        try:
+            page.wait_for_function(
+                "document.cookie.includes('aws-waf-token')",
+                timeout=10_000,
+            )
+        except Exception as exc:
+            raise RmcParkingError(f"WAF token never issued for {host}") from exc
+
+        t0 = time.monotonic()
+        api_resp = page.context.request.get(
+            full_url,
+            headers={
+                "Accept": "application/json, text/plain, */*",
+                "Referer": page.url,
+                "Origin": origin,
+            },
+            timeout=timeout_ms,
+        )
+        duration_ms = int((time.monotonic() - t0) * 1000)
+
+        slog.info(
+            "rmc_pay_browserbase_search",
+            host=host,
+            status_code=api_resp.status,
+            duration_ms=duration_ms,
+            path_used="browserbase",
+            session_id=session_id,
+        )
+
+        if not api_resp.ok:
+            raise RmcParkingError(
+                f"RMC Pay API ({host}) returned HTTP {api_resp.status}; see worker logs"
+            )
+
+        try:
+            payload: Dict[str, Any] = api_resp.json()
+        except ValueError as exc:
+            preview = (api_resp.text() or "")[:500]
+            logger.error(
+                "rmc_pay_non_json_response host=%s status_code=%s url=%s body_preview_first_500_chars=%r",
+                host,
+                api_resp.status,
+                full_url,
+                preview,
+            )
+            raise RmcParkingError(
+                f"RMC Pay API ({host}) returned non-JSON response "
+                f"(HTTP {api_resp.status}); see worker logs for body preview"
+            ) from exc
+
+        return _violations_from_api_payload(payload, params, host=host)
+    finally:
+        if ephemeral_close is not None:
+            ephemeral_close()
+
+
 def search_tickets(
     plate: str,
     state: str = "MA",
@@ -145,6 +361,17 @@ def search_tickets(
         raise ValueError("host is required")
     if not operator_id:
         raise ValueError("operator_id is required")
+
+    if settings.rmc_use_browserbase:
+        timeout_ms = max(1, int(timeout * 1000))
+        return _search_tickets_via_browserbase(
+            plate,
+            state,
+            host=host,
+            operator_id=operator_id,
+            api_base_path=api_base_path,
+            timeout_ms=timeout_ms,
+        )
 
     sess: requests.sessions.Session
     if session is None:
@@ -196,46 +423,7 @@ def search_tickets(
             f"(HTTP {resp.status_code}); see worker logs for url and body preview"
         ) from exc
 
-    status = payload.get("status")
-    errorcode = payload.get("errorcode")
-
-    if status == 404 and errorcode == 10:
-        return []
-
-    if status != 200 or errorcode not in (0, None):
-        reason = payload.get("reason") or "Unknown error"
-        raise RmcParkingError(
-            f"RMC Pay API error ({host}) {status} (code {errorcode}): {reason}"
-        )
-
-    data = payload.get("data") or []
-    violations: List[RmcViolation] = []
-
-    for item in data:
-        try:
-            violation_id = str(item.get("violation_id") or "")
-            violation_number = str(item.get("violation_number") or "")
-            lpn = str(item.get("lpn") or params["lpn"])
-            stateid = str(item.get("stateid") or params["stateid"])
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.warning("Skipping malformed violation item: %r (%s)", item, exc)
-            continue
-
-        if not violation_id or not violation_number:
-            logger.debug("Skipping violation with missing ids: %r", item)
-            continue
-
-        violations.append(
-            RmcViolation(
-                violation_id=violation_id,
-                violation_number=violation_number,
-                plate=lpn,
-                state=stateid,
-                raw=item,
-            )
-        )
-
-    return violations
+    return _violations_from_api_payload(payload, params, host=host)
 
 
 def check_plate_tickets_for_portal(
